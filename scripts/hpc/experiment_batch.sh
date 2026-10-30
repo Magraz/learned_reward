@@ -8,27 +8,17 @@
 # watchdog job is then submitted that cycles over all of the batches.
 
 BATCH_NAMES=(
-# "mjx_1a_3o_111_1024_gs" "mjx_1a_3o_111_1024_gs_sparse" "mjx_1a_3o_111_1024_gs_scale2" "mjx_1a_3o_111_1024_gs_sparse_scale2"
-"mjx_2a_4o_1122_1024_gs" "mjx_2a_4o_1122_1024_gs_sparse" "mjx_2a_4o_1122_1024_gs_scale2" "mjx_2a_4o_1122_1024_gs_sparse_scale2"
-"mjx_6a_4o_1024_gs" "mjx_6a_4o_1024_gs_sparse" "mjx_6a_4o_1024_gs_scale2" "mjx_6a_4o_1024_gs_sparse_scale2"
+"rover_2poi_c2" "rover_2poi_c8" "rover_4poi_c1234" "rover_6poi_c3_ring" "rover_6poi_c8-4-4-8-4-4"
+"rover_2poi_c2_diffrew" "rover_2poi_c8_diffrew" "rover_4poi_c1234_diffrew" "rover_6poi_c3_ring_diffrew" "rover_6poi_c8-4-4-8-4-4_diffrew"
 )
 
 EXPERIMENT_NAMES=(
-# "simplified_feudal"
-# "simplified_feudal_tanh_relative_input" "simplified_feudal_tanh_local_input"
-# "simplified_feudal_tanh_relative_input_cf" "simplified_feudal_tanh_local_input_cf"
-# "simplified_feudal_tanh_relative_input_dpp" "simplified_feudal_tanh_local_input_dpp"
-"simplified_feudal_tanh_local_input_interventions" "simplified_feudal_tanh_relative_input_interventions"
-"simplified_feudal_tanh_local_input_interventions_k2" "simplified_feudal_tanh_relative_input_interventions_k2"
-"simplified_feudal_tanh_relative_input_interventions_redecide_all" "simplified_feudal_tanh_relative_input_interventions_redecide"
+"mappo_mlp" "rmappo"
 )
-ALGORITHM=simplified_feudal_mappo_jax
-
-# EXPERIMENT_NAMES=("mlp")
-# ALGORITHM=mappo_jax
+ALGORITHM=rmappo_jax
 
 TRIAL_START=0
-TRIAL_END=4
+TRIAL_END=9
 SBATCH_SCRIPT="run_trial_gpu.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
