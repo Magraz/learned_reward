@@ -22,7 +22,7 @@ if [[ ${#BATCH_NAMES[@]} -eq 0 ]]; then
 fi
 
 SCRATCH=/nfs/stak/users/agrazvam/hpc-share/tmp
-SCRIPT=/nfs/stak/users/agrazvam/hpc-share/morphology-learning/scripts/hpc/watchdog_loop.py
+SCRIPT=/nfs/stak/users/agrazvam/hpc-share/learned_reward/scripts/hpc/watchdog_loop.py
 LOG_STEM="${BATCH_NAMES[0]}"
 BATCH_NAMES_ESCAPED="$(printf '%q ' "${BATCH_NAMES[@]}")"
 
