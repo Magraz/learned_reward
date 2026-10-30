@@ -1,0 +1,28 @@
+#Experiment config
+moving_avg_window_size: 1
+base_path: "/home/magraz/morphology-learning/experiments/results"
+
+batches: ["rover_2poi_c2"]
+
+# Batches for the multi-batch reward figure: one subplot per batch, each showing
+# the same `experiments`/`trials` below, with a single shared legend.
+multi_batches: [
+"rover_2poi_c2", 
+"rover_2poi_c8",
+"rover_4poi_c1234",
+"rover_6poi_c3_ring",
+"rover_6poi_c8-4-4-8-4-4"
+]
+
+experiments: ["rmappo", "mappo_mlp"]
+
+
+custom_labels:
+  hgnn_shared: Typed Hypergraph Critic + MAPPO
+  hgnn_proximity: Typed Hypergraph Critic + MAPPO
+
+plot_colors:
+  hgnn_mix: "tab:purple"
+  multi_box_push_12a_6o_dense/mlp_shared: "tab:red"
+
+trials: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"]

@@ -1,0 +1,29 @@
+# @package _global_
+# JAX MAPPO (algorithms/mappo_jax): logically mirrors mappo_vanilla, but runs
+# fully jitted over the functional MJX envs (env=multi_box_push_mjx_* only).
+# Same params surface as mappo_vanilla so the two are drop-in comparable.
+algorithm: mappo_jax
+params:
+  n_epochs: 6
+  n_total_steps: 100000000.0     # float on purpose; env groups override when different
+  n_minibatches: 8
+  # Rollout length per env stream. Unlike the torch stacks this must stay
+  # per-env: it is the static length of the jitted collect scan. The batch is
+  # n_steps * env.n_envs, and n_envs is a literal in each MJX env group (a vmap
+  # width, never core-derived), so the batch is still fixed by config alone.
+  n_steps: 1048
+  parameter_sharing: true       # mappo_jax implements the shared-actor path only
+  lr: 0.0003
+  gamma: 0.99
+  lmbda: 0.95
+  eps_clip: 0.2
+  ent_coef: 0.01
+  grad_clip: 0.5
+  # Deterministic episodes per eval. Was an invisible default of 5, so every
+  # `reward` point in every plot predating this is a 5-episode mean. Eval cost
+  # is the fixed env.max_steps SEQUENTIAL scan, so episodes are nearly free
+  # (width, not depth). Kept equal to conf/algorithm/feudal_mappo_jax.yaml so
+  # the feudal-vs-flat comparison does not also compare two eval noise floors.
+  n_eval_episodes: 32
+model_params:
+  hidden_dim: 168

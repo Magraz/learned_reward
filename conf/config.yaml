@@ -1,0 +1,56 @@
+# Hydra composition root. A run = algorithm × env × model × seeds.
+#
+#   uv run python train.py env=multi_box_push_9a_3o model=hgnn_mix trial_id=0
+#   uv run python train.py -m model=mlp_shared,gnn_critic trial_id=0,1,2   # sweep
+#
+# Group order below sets inter-group precedence (later wins): algorithm supplies
+# the base params/model_params, env overrides env-scoped params (val_coef,
+# n_total_steps) + publishes the `hyperedges` map, model overrides model_params,
+# seeds injects params.random_seeds. `_self_` last lets this file's top-level
+# keys win.
+defaults:
+  - algorithm: mappo
+  - env: multi_box_push_9a_3o
+  - model: mlp_shared
+  - seeds: standard
+  - _self_
+
+device: cpu
+trial_id: debug
+view: false
+checkpoint: false
+evaluate: false
+debug: false
+
+# Parallelism budget. `n_jobs` = how many sweep jobs run at once (joblib layer).
+# Subprocess-env groups set `n_envs: ${envs_per_job:${n_jobs}}` themselves so the
+# two layers never oversubscribe; pass e.g. `n_jobs=4` (with
+# `hydra/launcher=joblib_auto`, which reads this value) and their n_envs shrinks
+# to match.
+#
+# NOTE: `n_envs` is deliberately NOT set here. It used to live in this `_self_`
+# block, which (being last in the defaults list) overrode every env group and
+# made the *core count* determine the batch size — i.e. the hardware silently
+# changed the optimization trajectory. It now belongs to each env group, so the
+# batch is part of the recorded experiment definition. See conf/env/*.yaml.
+n_jobs: 1
+
+#This part modifies what how hydra handles the directories. This way it stays the way I had it.
+#Maybe will go full hydra in the future
+hydra:
+  run:
+    dir: .
+  sweep:
+    dir: .
+    subdir: .
+  output_subdir: null            # no .hydra/ config dump next to results
+  job:
+    chdir: false                 # keep cwd; results paths are computed by the runner
+  job_logging:
+    version: 1
+    root: { handlers: [] }
+    disable_existing_loggers: false
+  hydra_logging:
+    version: 1
+    root: { handlers: [] }
+    disable_existing_loggers: false
