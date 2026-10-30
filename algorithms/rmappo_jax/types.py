@@ -197,9 +197,10 @@ class Transition(NamedTuple):
 
     obs: jax.Array  # (n_envs, n_agents, obs_dim)
     global_state: jax.Array  # (n_envs, global_state_dim)
-    # GRU hidden states the step started from, BEFORE `mask` is applied
-    # (n_envs, n_agents, recurrent_N, hidden_size); a scalar placeholder for the
-    # feedforward policy.
+    # GRU hidden states the step started from, BEFORE `mask` is applied:
+    # `actor_h` (n_envs, n_agents, recurrent_N, hidden_size), `critic_h`
+    # (n_envs, recurrent_N, hidden_size) as the critic runs once per env; a
+    # scalar placeholder for the feedforward policy.
     actor_h: jax.Array
     critic_h: jax.Array
     # (n_envs,) 0.0 when this observation starts a new episode (the hidden state
@@ -208,7 +209,7 @@ class Transition(NamedTuple):
     action: jax.Array  # (n_envs, n_agents, action_dim) | (n_envs, n_agents)
     log_prob: jax.Array  # (n_envs, n_agents)
     value: jax.Array  # (n_envs, n_agents) NORMALIZED critic output
-    reward: jax.Array  # (n_envs, n_agents) the shared team reward, per agent
+    reward: jax.Array  # (n_envs, n_agents) each agent's reward (the team's, or its own)
     done: jax.Array  # (n_envs,) terminated | truncated
     # (n_envs, n_agents) 1.0 when the agent took a real decision this step
     # (info["active"]; all ones for envs that do not emit it).

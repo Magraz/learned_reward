@@ -27,6 +27,11 @@ env:
     sensor_radius: null              # null = arena diagonal (sense everything)
   reward:
     type: coupling_depletion         # team reward; POIs pay until used up
+    # What every rover trains on: shared_reward (the team reward, one team
+    # value in the critic) or difference_rewards (each rover's own D_i).
+    # Evaluation scores the team reward under both. The mode is not in the
+    # results path: give each mode its own env group.
+    mode: shared_reward
   pois:
     type: static
     radius: 1.0                      # defaults for every entry below

@@ -24,7 +24,12 @@ from algorithms.rmappo_jax.mappo import (
     create_train_state,
     zero_hidden,
 )
-from algorithms.rmappo_jax.trainer import actor_step, make_train, validate
+from algorithms.rmappo_jax.trainer import (
+    actor_step,
+    make_train,
+    n_critic_outputs,
+    validate,
+)
 from algorithms.rmappo_jax.types import Experiment, Model_Params, Params, make_config
 
 # Settings that leave every parameter shape unchanged, so a checkpoint alone
@@ -124,6 +129,7 @@ class RMAPPO_JAX_Runner(MAPPO_JAX_Runner):
             f"clipped_value={config.use_clipped_value_loss} "
             f"proper_time_limits={config.use_proper_time_limits} "
             f"lr_decay={config.use_linear_lr_decay} | "
+            f"reward_mode={getattr(self.env, 'reward_mode', 'team')} | "
             f"centralized input: gs_dim={global_state_dim(self.env)} "
             f"(env hook: {hasattr(self.env, 'global_state')})"
         )
@@ -214,6 +220,8 @@ class RMAPPO_JAX_Runner(MAPPO_JAX_Runner):
             self.env.action_dim,
             getattr(self.env, "discrete", False),
             num_updates=1,
+            # Must match training, or the restored critic head won't fit.
+            n_critic_outputs=n_critic_outputs(self.env),
         )
         path = self.dirs["models"] / "models_finished.msgpack"
         if not path.exists():

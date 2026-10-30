@@ -14,6 +14,7 @@ import pytest
 
 from environments.rover import (
     BaseRoverEnv,
+    CouplingDepletionReward,
     ObservationModel,
     POIModel,
     RewardModel,
@@ -90,8 +91,9 @@ def test_reset_and_step_jit_and_vmap():
         state, actions
     )
     assert obs.shape == (8, 4, 16)
-    assert reward.shape == terminated.shape == truncated.shape == (8,)
-    assert info["agent_rewards"].shape == (8, 4)
+    assert terminated.shape == truncated.shape == (8,)
+    assert reward.shape == info["shared_reward"].shape == (8, 4)
+    assert info["difference_rewards"].shape == (8, 4)
     assert info["task_reward"].shape == (8,)
     assert np.all(np.isfinite(np.asarray(obs)))
     assert np.all(np.asarray(state.t) == 1)
@@ -222,19 +224,96 @@ def test_heading_wraps_and_walls_clip():
 # ------------------------------------------------------------------- reward
 
 
-def test_reward_needs_the_coupling_and_is_split_among_observers():
+def test_reward_needs_the_coupling_and_is_shared_by_every_rover():
     env = make_env(n_agents=3)
     _, _, r, _, _, info = env.step(state_at(env, [[5, 5], [1, 1], [9, 9]]), stay(3))
-    assert float(r) == 0.0 and float(info["poi_remaining"][0]) == 1.0
+    assert float(info["task_reward"]) == 0.0 and float(info["poi_remaining"][0]) == 1.0
+    np.testing.assert_array_equal(r, [0.0, 0.0, 0.0])
     # the radius is inclusive: (6, 5) is exactly 1.0 from the POI
     _, _, r, _, _, info = env.step(state_at(env, [[5, 5], [6, 5], [9, 9]]), stay(3))
-    np.testing.assert_allclose(r, 0.05)
-    np.testing.assert_allclose(info["agent_rewards"], [0.025, 0.025, 0.0])
-    # a third rover adds nothing to the payout, only splits it
+    np.testing.assert_allclose(info["task_reward"], 0.05)
+    # every rover is paid G, the one far from the POI included
+    np.testing.assert_allclose(r, [0.05] * 3)
+    np.testing.assert_array_equal(r, info["shared_reward"])
+    # a third rover adds nothing to the payout
+    _, _, _, _, _, info = env.step(state_at(env, [[5, 5], [6, 5], [4.5, 5]]), stay(3))
+    np.testing.assert_allclose(info["task_reward"], 0.05)
+
+
+def test_difference_rewards_pay_only_rovers_that_complete_a_coupling():
+    env = make_env(n_agents=3)
+    # alone at a coupling-2 POI: G = 0 with or without it
+    _, _, _, _, _, info = env.step(state_at(env, [[5, 5], [1, 1], [9, 9]]), stay(3))
+    np.testing.assert_array_equal(info["difference_rewards"], [0.0, 0.0, 0.0])
+    # exactly the coupling: each observer is needed, so each earns the payout
+    _, _, _, _, _, info = env.step(state_at(env, [[5, 5], [6, 5], [9, 9]]), stay(3))
+    np.testing.assert_allclose(info["difference_rewards"], [0.05, 0.05, 0.0])
+    # one beyond the coupling: the POI still pays without any single rover
+    _, _, _, _, _, info = env.step(state_at(env, [[5, 5], [6, 5], [4.5, 5]]), stay(3))
+    np.testing.assert_allclose(info["task_reward"], 0.05)
+    np.testing.assert_array_equal(info["difference_rewards"], [0.0, 0.0, 0.0])
+    # a used-up POI pays nothing either way
+    _, _, _, _, _, info = env.step(
+        state_at(env, [[5, 5], [6, 5], [9, 9]], remaining=[0.0]), stay(3)
+    )
+    np.testing.assert_array_equal(info["difference_rewards"], [0.0, 0.0, 0.0])
+    # rover 0 sits in both radii and completes both couplings; rover 1 only B's
+    env = make_env(entries=[{"position": [5.0, 5.0], "coupling": 1},
+                            {"position": [6.5, 5.0], "coupling": 2}])
+    _, _, _, _, _, info = env.step(state_at(env, [[5.75, 5], [7, 5]]), stay(2))
+    np.testing.assert_allclose(info["task_reward"], 0.1)
+    np.testing.assert_allclose(info["difference_rewards"], [0.1, 0.05])
+
+
+def test_difference_rewards_match_the_team_reward_without_each_rover():
+    """D_i = G - G_{-i}, with G_{-i} from the reward model run on the other rovers."""
+    env = load_rover_env("rover_4poi_c1234")
+    _, state = env.reset(jax.random.PRNGKey(0))
+    @jax.jit
+    def reward(rovers, pois):
+        out = env.reward(env, rovers, pois)
+        return out.team_reward, out.info["difference_rewards"]
+
+    n_agents, n_pois = env.n_agents, env.n_pois
+    rng = np.random.default_rng(0)
+    n_with_credit = 0
+    for _ in range(64):
+        # every rover near a random POI, some just outside its radius
+        near = np.asarray(state.pois.position)[rng.integers(0, n_pois, n_agents)]
+        rovers = RoverState(
+            jnp.asarray(near + rng.uniform(-0.9, 0.9, (n_agents, 2)), jnp.float32),
+            jnp.zeros(n_agents),
+        )
+        remaining = np.where(rng.random(n_pois) < 0.25, 0.0, 1.0)
+        pois = dataclasses.replace(state.pois, remaining=jnp.asarray(remaining, jnp.float32))
+        team, difference = reward(rovers, pois)
+        for i in range(n_agents):
+            keep = np.arange(n_agents) != i
+            team_without, _ = reward(
+                RoverState(rovers.position[keep], rovers.heading[keep]), pois
+            )
+            np.testing.assert_allclose(difference[i], team - team_without, atol=1e-6)
+        n_with_credit += int(np.any(np.asarray(difference) > 0))
+    assert n_with_credit > 10  # the draws exercise the nonzero case
+
+
+@pytest.mark.parametrize("mode, per_agent", [
+    ("shared_reward", False), ("difference_rewards", True),
+])
+def test_the_mode_picks_the_per_rover_reward_and_the_team_reward_stays_g(mode, per_agent):
+    env = make_env(n_agents=3, reward=CouplingDepletionReward(mode))
+    assert env.per_agent_rewards is per_agent and env.reward_mode == mode
+    # one rover beyond the coupling: every D_i is 0 while G is 0.05
     _, _, r, _, _, info = env.step(state_at(env, [[5, 5], [6, 5], [4.5, 5]]), stay(3))
-    np.testing.assert_allclose(r, 0.05)
-    np.testing.assert_allclose(info["agent_rewards"], [0.05 / 3] * 3, rtol=1e-6)
-    np.testing.assert_allclose(info["agent_rewards"].sum(), r, rtol=1e-6)
+    np.testing.assert_array_equal(r, info[mode])
+    np.testing.assert_allclose(info["task_reward"], 0.05)
+
+
+def test_rollouts_score_the_team_reward_under_difference_rewards():
+    env = load_rover_env("rover_2poi_c2", ["env.reward.mode=difference_rewards"])
+    traj = rollout(env, make_scripted_coalition_policy(env), jax.random.PRNGKey(0))
+    # two rovers complete each coupling, so the D_i sum to 2 G; the return is G's
+    np.testing.assert_allclose(traj.episode_return, 2.0, atol=1e-5)
 
 
 def test_poi_pays_a_steady_rate_until_used_up():
@@ -242,8 +321,8 @@ def test_poi_pays_a_steady_rate_until_used_up():
     state = state_at(env, [[5, 5], [5.5, 5]])
     rewards, terminated = [], []
     for _ in range(25):
-        _, state, r, term, trunc, _ = env.step(state, stay(2))
-        rewards.append(float(r))
+        _, state, _, term, trunc, info = env.step(state, stay(2))
+        rewards.append(float(info["task_reward"]))
         terminated.append(bool(term))
         assert not (bool(term) and bool(trunc))
     np.testing.assert_allclose(rewards[:20], 0.05, rtol=1e-5)
@@ -305,7 +384,7 @@ class NegativeDistance(RewardModel):
 
     def __call__(self, env, rovers, pois):
         d = jnp.linalg.norm(rovers.position - pois.position[0], axis=-1)
-        return RewardOutput(-d, pois, jnp.array(False), {"distance": d})
+        return RewardOutput(-d, -d.sum(), pois, jnp.array(False), {"distance": d})
 
 
 def test_components_are_pluggable():
@@ -327,6 +406,16 @@ def test_an_observation_model_with_the_wrong_declared_width_is_rejected():
 
     with pytest.raises(ValueError, match="obs_dim"):
         BaseRoverEnv(2, DriftingPOIs(), Wrong())
+
+
+def test_a_reward_model_without_one_reward_per_rover_is_rejected():
+    class TeamOnly(NegativeDistance):
+        def __call__(self, env, rovers, pois):
+            out = super().__call__(env, rovers, pois)
+            return dataclasses.replace(out, reward=out.team_reward)
+
+    with pytest.raises(ValueError, match="must return reward of shape"):
+        BaseRoverEnv(2, DriftingPOIs(), OwnPosition(), TeamOnly())
 
 
 # ------------------------------------------------------------------- config
@@ -368,6 +457,7 @@ def test_hydra_overrides_reach_the_env():
         (lambda c: c.update(bogus=1), "unknown rover env keys"),
         (lambda c: c["dynamics"].update(max_sped=1.0), "unknown dynamics keys"),
         (lambda c: c["observation"].update(type="lidar"), "unknown observation type"),
+        (lambda c: c["reward"].update(mode="team"), "unknown reward mode"),
         (lambda c: c.update(environment="multi_box_push"), "environment must be"),
         (lambda c: c["pois"]["entries"][0].update(cupling=2), "unknown keys"),
         (lambda c: c["pois"]["entries"][0].update(position=[11.0, 5.0]), "outside"),

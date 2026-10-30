@@ -183,7 +183,9 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    """`R_Critic` (without PopArt). Returns `(value, h)`, `value` one per row."""
+    """`R_Critic` (without PopArt), run once per env on its centralized state.
+    Returns `(value, h)`, `value` `(..., n_outputs)`: one team value, or one
+    per agent (see `trainer.n_critic_outputs`)."""
 
     hidden_size: int = 64
     layer_N: int = 1
@@ -191,6 +193,7 @@ class Critic(nn.Module):
     use_feature_normalization: bool = True
     use_recurrent_policy: bool = True
     recurrent_N: int = 1
+    n_outputs: int = 1
 
     @nn.compact
     def __call__(self, cent_obs, h, mask):
@@ -203,12 +206,12 @@ class Critic(nn.Module):
             self.recurrent_N,
             name="trunk",
         )(cent_obs, h, mask)
-        value = _dense(1, 1.0, "v_out")(x)
-        return value[..., 0], h
+        return _dense(self.n_outputs, 1.0, "v_out")(x), h
 
 
-def make_networks(config, action_dim: int, discrete: bool):
-    """The actor and critic modules a config describes."""
+def make_networks(config, action_dim: int, discrete: bool, n_critic_outputs: int = 1):
+    """The actor and critic modules a config describes. `n_critic_outputs` is
+    the critic head's width (see `trainer.n_critic_outputs`)."""
     trunk = dict(
         hidden_size=config.hidden_size,
         layer_N=config.layer_N,
@@ -218,7 +221,7 @@ def make_networks(config, action_dim: int, discrete: bool):
         recurrent_N=config.recurrent_N,
     )
     actor = Actor(action_dim=action_dim, discrete=discrete, gain=config.gain, **trunk)
-    return actor, Critic(**trunk)
+    return actor, Critic(n_outputs=n_critic_outputs, **trunk)
 
 
 # ---------------------------------------------------------------------------

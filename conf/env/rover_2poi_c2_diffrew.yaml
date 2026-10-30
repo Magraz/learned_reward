@@ -1,0 +1,9 @@
+# @package _global_
+# rover_2poi_c8 with every rover trained on its difference reward D_i.
+defaults:
+  - rover_2poi_c2
+  - _self_
+
+env:
+  reward:
+    mode: difference_rewards

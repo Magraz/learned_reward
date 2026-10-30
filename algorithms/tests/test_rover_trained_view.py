@@ -35,8 +35,10 @@ def test_view_matches_functional_policy_and_resets_between_episodes(recurrent):
                 ts.actor_ts.apply_fn, ts.actor_ts.params, obs[None], hidden,
                 jnp.ones((1,)), jax.random.PRNGKey(0), False, deterministic=True,
             )
-            obs, state, reward, _, _, _ = env.step(state, action[0])
-            return (obs, state, hidden), (action[0], state.rovers.position, reward)
+            obs, state, _, _, _, info = env.step(state, action[0])
+            return (obs, state, hidden), (
+                action[0], state.rovers.position, info["task_reward"]
+            )
 
         _, (actions, positions, rewards) = jax.lax.scan(
             step, (obs, state, zero_hidden(config, (1, env.n_agents))),

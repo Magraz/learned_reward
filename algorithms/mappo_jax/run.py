@@ -125,7 +125,8 @@ class MAPPO_JAX_Runner:
 
         # A per-agent reward switches the critic to a per-agent value head and
         # runs GAE on the agent axis (see MAPPOConfig.per_agent_rewards). The
-        # rover domain pays a team reward, so this is False there.
+        # rover domain is per agent under difference rewards only; under its
+        # shared reward the critic keeps one team value.
         per_agent = per_agent_rewards(self.env)
 
         n_envs = env_config.get("n_envs")

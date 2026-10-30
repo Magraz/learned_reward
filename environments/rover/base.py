@@ -104,6 +104,12 @@ class BaseRoverEnv:
         self.pois = pois
         self.observation = SectorDensityObservation() if observation is None else observation
         self.reward = CouplingDepletionReward() if reward is None else reward
+        # `step`'s reward is one per rover in every mode. False here means the
+        # rovers' rewards are always equal, so a trainer may keep one team value
+        # and train on any column (`mappo_jax.trainer.per_agent_rewards`).
+        self.per_agent_rewards = bool(self.reward.per_agent_rewards)
+        # Printed by the runners at launch; a custom reward model may have none.
+        self.reward_mode = getattr(self.reward, "mode", None)
         self.pois.validate(self)
 
         key = jax.random.PRNGKey(0)
@@ -117,6 +123,18 @@ class BaseRoverEnv:
             raise ValueError(
                 f"observation model declares obs_dim={self.observation_dim} but "
                 f"emits {obs_shape}"
+            )
+        def rewards_at_reset(k):
+            state = self.reset(k)[1]
+            out = self.reward(self, state.rovers, state.pois)
+            return jnp.asarray(out.reward), jnp.asarray(out.team_reward)
+
+        reward, team_reward = jax.eval_shape(rewards_at_reset, key)
+        if reward.shape != (self.n_agents,) or team_reward.shape != ():
+            raise ValueError(
+                f"{type(self.reward).__name__} must return reward of shape "
+                f"({self.n_agents},) and team_reward of shape (), got "
+                f"{reward.shape} and {team_reward.shape}"
             )
 
     # ---------------------------------------------------------------- API
@@ -140,7 +158,7 @@ class BaseRoverEnv:
         next_state = RoverEnvState(rovers=rovers, pois=out.pois, t=t)
         reward = jnp.asarray(out.reward)
         info = {
-            "task_reward": reward if reward.ndim == 0 else reward.sum(),
+            "task_reward": jnp.asarray(out.team_reward),
             "agent_positions": rovers.position,
             "agent_headings": rovers.heading,
             "agent_speeds": speed,

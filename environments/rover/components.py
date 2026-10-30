@@ -8,6 +8,9 @@ A rover-domain variant is a choice of three components:
 * ``RewardModel`` — what the team is paid and how POIs are used up. The reward
   model owns POI consumption because depletion is part of the reward's
   semantics, so it returns the updated ``POIState`` and the termination flag.
+  It returns two rewards: one per rover, the signal the learner trains on, and
+  the team's, which evaluation scores. They stay separate because a per-rover
+  signal need not sum to the team's (difference rewards do not).
 
 Every method is called inside ``jit``/``vmap``, so it must be pure jnp on the
 state it is given. Static configuration (couplings from a yaml, sector counts)
@@ -46,13 +49,18 @@ class ObservationModel(abc.ABC):
 
 @dataclasses.dataclass(frozen=True)
 class RewardOutput:
-    reward: jax.Array  # () team reward, or (n_agents,) for per-agent rewards
+    reward: jax.Array  # (n_agents,) the reward each rover is trained on
+    team_reward: jax.Array  # () what the team earned; evaluation scores this
     pois: POIState  # POIs after consumption
     terminated: jax.Array  # () bool, nothing left to earn
     info: dict  # extra per-step quantities, merged into ``step``'s info
 
 
 class RewardModel(abc.ABC):
+    # False when every rover always receives the same reward, so a trainer may
+    # keep a single team value instead of one per rover.
+    per_agent_rewards: bool = True
+
     @abc.abstractmethod
     def __call__(self, env, rovers: RoverState, pois: POIState) -> RewardOutput:
         """Reward for the rovers' post-move positions."""

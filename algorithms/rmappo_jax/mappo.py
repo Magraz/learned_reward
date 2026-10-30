@@ -17,12 +17,18 @@ One update, in on-policy's order:
      its first step, and the GRU resets wherever the episode mask is 0.
    - Feedforward policy (`feed_forward_generator`): every row is its own
      sequence of length 1.
+   - Not on-policy's: the critic's sequences are per env, not per (env,
+     agent), drawn from their own permutation into the same `n_minibatches`
+     (`gather_critic_minibatch`). The critic reads each env's centralized state
+     once (see `trainer.critic_step`); on-policy repeats it for every agent row.
 4. Per minibatch, the actor step then the critic step, with separate Adams and
    separate gradient-norm clips (`R_MAPPO.ppo_update`):
    - actor: `PPO-clip - ent_coef * entropy`, both averaged over active rows;
    - critic: `ValueNorm` is updated from the minibatch's returns (every row)
      BEFORE its loss, then `max(huber(e), huber(e_clipped))` against the
-     normalized returns, averaged over active rows, times `val_coef`.
+     normalized returns, averaged over active rows, times `val_coef`. The
+     critic's one team value (shared reward) is every agent's, so the loss and
+     ValueNorm still see one value per (env, agent) row, as on-policy's.
 """
 
 from typing import NamedTuple
@@ -82,8 +88,9 @@ def create_train_state(
     action_dim: int,
     discrete: bool,
     num_updates: int,
+    n_critic_outputs: int = 1,
 ) -> RMAPPOTrainState:
-    actor, critic = make_networks(config, action_dim, discrete)
+    actor, critic = make_networks(config, action_dim, discrete, n_critic_outputs)
     rng_actor, rng_critic = jax.random.split(rng)
     h, mask = zero_hidden(config, (1,)), jnp.ones((1,))
     actor_params = actor.init(rng_actor, jnp.zeros((1, obs_dim)), h, mask)
@@ -147,21 +154,56 @@ def chunk_count(trajectory: Transition, chunk_length: int) -> int:
     return n_envs * n_agents * (n_steps // chunk_length)
 
 
-def gather_minibatch(trajectory: Transition, advantages, returns, chunk_ids, chunk_length):
-    """The training sequences `chunk_ids`, each field `(L, B, ...)`.
+def critic_chunk_count(trajectory: Transition, chunk_length: int) -> int:
+    """The critic's training sequences, one set per env: `n_envs * n_steps // L`."""
+    n_steps, n_envs, _ = trajectory.reward.shape
+    return n_envs * (n_steps // chunk_length)
+
+
+def _chunk_steps(chunk_ids, per_trajectory, chunk_length):
+    """`(start, t)`: each chunk's first step `(B,)` and all its steps `(L, B)`."""
+    start = (chunk_ids % per_trajectory) * chunk_length
+    return start, start[None, :] + jnp.arange(chunk_length)[:, None]
+
+
+def gather_critic_minibatch(trajectory: Transition, returns, chunk_ids, chunk_length):
+    """The critic's sequences `chunk_ids`, each field `(L, B, ...)`.
+
+    The critic reads each env's centralized state once for every agent's value,
+    so its sequences are per env: chunk `c` is env `c // C`, steps `(c % C) * L`
+    onward, with C chunks per env trajectory. `critic_h0` is the env's hidden
+    state stored at the chunk's first step, or the feedforward placeholder.
+    """
+    n_steps = trajectory.reward.shape[0]
+    per_trajectory = n_steps // chunk_length
+    env = chunk_ids // per_trajectory
+    start, t = _chunk_steps(chunk_ids, per_trajectory, chunk_length)
+    e = env[None, :]
+    h = trajectory.critic_h
+    return {
+        "cent_obs": trajectory.global_state[t, e],
+        "mask": trajectory.mask[t, e],
+        "old_value": trajectory.value[t, e],
+        "returns": returns[t, e],
+        "active": trajectory.active_mask[t, e],
+        "critic_h0": h[start, env] if h.ndim > 1 else jnp.zeros(()),
+    }
+
+
+def gather_minibatch(trajectory: Transition, advantages, chunk_ids, chunk_length):
+    """The actor's training sequences `chunk_ids`, each field `(L, B, ...)`.
 
     Chunk `c` follows on-policy's `_cast` order (env, agent, time): env
     `c // (N * C)`, agent `(c // C) % N`, steps `(c % C) * L` onward, with C
-    chunks per (env, agent) trajectory. `actor_h0` / `critic_h0` are the hidden
-    states STORED at each chunk's first step (`recurrent_generator`), or the
-    feedforward placeholder.
+    chunks per (env, agent) trajectory. `actor_h0` is the hidden state STORED
+    at each chunk's first step (`recurrent_generator`), or the feedforward
+    placeholder.
     """
     n_steps, _, n_agents = trajectory.reward.shape
     per_trajectory = n_steps // chunk_length
     env = chunk_ids // (n_agents * per_trajectory)
     agent = (chunk_ids // per_trajectory) % n_agents
-    start = (chunk_ids % per_trajectory) * chunk_length
-    t = start[None, :] + jnp.arange(chunk_length)[:, None]  # (L, B)
+    start, t = _chunk_steps(chunk_ids, per_trajectory, chunk_length)
     e, a = env[None, :], agent[None, :]
 
     def per_agent(x):
@@ -175,14 +217,9 @@ def gather_minibatch(trajectory: Transition, advantages, returns, chunk_ids, chu
 
     return {
         "obs": per_agent(trajectory.obs),
-        # The centralized state, repeated for every agent row (on-policy's MPE
-        # runner repeats share_obs per agent).
-        "cent_obs": per_env(trajectory.global_state),
         "mask": per_env(trajectory.mask),
         "action": per_agent(trajectory.action),
         "old_log_prob": per_agent(trajectory.log_prob),
-        "old_value": per_agent(trajectory.value),
-        "returns": per_agent(returns),
         "advantage": per_agent(advantages),
         "active": per_agent(trajectory.active_mask),
         "action_mask": (
@@ -191,7 +228,6 @@ def gather_minibatch(trajectory: Transition, advantages, returns, chunk_ids, chu
             else None
         ),
         "actor_h0": hidden(trajectory.actor_h),
-        "critic_h0": hidden(trajectory.critic_h),
     }
 
 
@@ -260,18 +296,24 @@ def ppo_update(
     discrete: bool,
 ):
     """One `R_MAPPO.train` call. Returns the new train state and the metrics,
-    averaged over epochs x minibatches like on-policy's `train_info`."""
+    averaged over epochs x minibatches like on-policy's `train_info`. The actor
+    trains on (env, agent) sequences, the critic on per-env ones, each from its
+    own permutation, in the same `n_minibatches`.
+    """
     advantages, returns, explained_variance = prepare_advantages(
         trajectory, last_value, train_state.value_norm, config
     )
     length = config.chunk_length
     n_chunks = chunk_count(trajectory, length)
     minibatch_chunks = n_chunks // config.n_minibatches
-    if minibatch_chunks < 1:
+    n_critic_chunks = critic_chunk_count(trajectory, length)
+    critic_minibatch_chunks = n_critic_chunks // config.n_minibatches
+    if critic_minibatch_chunks < 1:
         raise ValueError(
-            f"{n_chunks} training sequences cannot fill {config.n_minibatches} "
-            "minibatches"
+            f"{n_critic_chunks} critic training sequences ({n_chunks} for the "
+            f"actor) cannot fill {config.n_minibatches} minibatches"
         )
+    n_agents = trajectory.reward.shape[-1]
     actor_apply = train_state.actor_ts.apply_fn
     critic_apply = train_state.critic_ts.apply_fn
 
@@ -295,6 +337,8 @@ def ppo_update(
         values = unroll(
             critic_apply, params, batch["cent_obs"], batch["critic_h0"], batch["mask"]
         )
+        # A one-wide head is the team value, every agent's.
+        values = jnp.broadcast_to(values, values.shape[:-1] + (n_agents,))
         target = (
             vn_lib.normalize(value_norm, batch["returns"])
             if config.use_valuenorm
@@ -305,9 +349,13 @@ def ppo_update(
         )
         return value_loss * config.val_coef, value_loss
 
-    def _minibatch(carry, chunk_ids):
+    def _minibatch(carry, ids):
         actor_ts, critic_ts, value_norm = carry
-        batch = gather_minibatch(trajectory, advantages, returns, chunk_ids, length)
+        chunk_ids, critic_chunk_ids = ids
+        batch = gather_minibatch(trajectory, advantages, chunk_ids, length)
+        critic_batch = gather_critic_minibatch(
+            trajectory, returns, critic_chunk_ids, length
+        )
 
         (_, (policy_loss, dist_entropy, ratio)), actor_grads = jax.value_and_grad(
             _actor_loss, has_aux=True
@@ -316,10 +364,10 @@ def ppo_update(
         actor_ts = actor_ts.apply_gradients(grads=actor_grads)
 
         if config.use_valuenorm:
-            value_norm = vn_lib.update(value_norm, batch["returns"])
+            value_norm = vn_lib.update(value_norm, critic_batch["returns"])
         (_, value_loss), critic_grads = jax.value_and_grad(
             _critic_loss, has_aux=True
-        )(critic_ts.params, batch, value_norm)
+        )(critic_ts.params, critic_batch, value_norm)
         critic_grad_norm = optax.tree.norm(critic_grads)
         critic_ts = critic_ts.apply_gradients(grads=critic_grads)
 
@@ -340,7 +388,15 @@ def ppo_update(
         minibatches = order[: config.n_minibatches * minibatch_chunks].reshape(
             config.n_minibatches, minibatch_chunks
         )
-        networks, metrics = jax.lax.scan(_minibatch, networks, minibatches)
+        critic_order = jax.random.permutation(
+            jax.random.fold_in(perm_rng, 1), n_critic_chunks
+        )
+        critic_minibatches = critic_order[
+            : config.n_minibatches * critic_minibatch_chunks
+        ].reshape(config.n_minibatches, critic_minibatch_chunks)
+        networks, metrics = jax.lax.scan(
+            _minibatch, networks, (minibatches, critic_minibatches)
+        )
         return (networks, rng), metrics
 
     (networks, _), metrics = jax.lax.scan(

@@ -67,7 +67,8 @@ class MAPPOConfig:
     parameter_sharing: bool = True
     hidden_dim: int = 168
     n_eval_episodes: int = 32
-    # True when the env emits a per-agent reward (reward_mode="difference_rewards").
+    # True when the env's agents can receive different rewards
+    # (`trainer.per_agent_rewards`; rover: reward mode difference_rewards).
     # Switches the critic to a per-agent value head and runs GAE on the agent axis;
     # False keeps the exact scalar-team-reward path (mappo_vanilla parity).
     per_agent_rewards: bool = False

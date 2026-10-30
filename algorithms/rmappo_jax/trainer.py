@@ -7,11 +7,16 @@ Rollouts follow on-policy's shared runner (`runner/shared/*_runner.py`):
   the buffer's last row to its first. An episode that ends mid-rollout is
   restarted at once (the MJX envs have no auto-reset; on-policy's vec env does
   this itself), its hidden states are zeroed and its next mask is 0 (`insert`).
-- The centralized critic's input is the env's centralized state, the same for
-  every agent of an env (`mappo_jax.trainer.global_state_fn`: the env's own
-  state when it publishes one, else the concatenated observations, which is
-  what on-policy's MPE runner builds). The critic still emits one value per
-  (env, agent) row, and every agent receives the shared team reward.
+- The centralized critic's input is the env's centralized state
+  (`mappo_jax.trainer.global_state_fn`: the env's own state when it publishes
+  one, else the concatenated observations, which is what on-policy's MPE runner
+  builds). Not on-policy's: the critic reads it once per env, with one GRU
+  hidden state per env, and its head emits one team value, or one value per
+  agent when the env's agents can be paid differently (`per_agent_rewards`,
+  e.g. rover difference rewards; `n_critic_outputs`). on-policy repeats the
+  state for every agent row. A team value is every agent's, so values stay
+  per (env, agent) downstream. Every agent receives the team reward, or its
+  own reward under `per_agent_rewards`.
 - A time-limit truncation is a terminal (on-policy's default
   `use_proper_time_limits=False`). With the flag on, this repo's bootstrap is
   used instead: the real successor is valued before the restart, through the
@@ -33,6 +38,7 @@ from algorithms.mappo_jax.trainer import (
     make_eval_fn,
     per_agent_rewards,
     restart_done_envs,
+    training_reward,
 )
 from algorithms.rmappo_jax import value_norm as vn_lib
 from algorithms.rmappo_jax.mappo import (
@@ -68,14 +74,6 @@ def validate(config: RMAPPOConfig, env):
             "rmappo_jax implements on-policy's shared policy only "
             "(parameter_sharing=true)"
         )
-    if per_agent_rewards(env):
-        raise NotImplementedError(
-            f"reward_mode={getattr(env, 'reward_mode', None)!r} emits a reward "
-            "per agent, but every "
-            "agent row of rmappo_jax's critic sees the same centralized state (as "
-            "in on-policy's MPE runner), so the critic could only learn the "
-            "agents' mean return. Use mappo_jax, whose critic has a per-agent head."
-        )
     if hasattr(env, "avail_actions") and not getattr(env, "discrete", False):
         raise ValueError("avail_actions is only supported for discrete actions")
     if config.n_steps % config.chunk_length:
@@ -110,19 +108,19 @@ def actor_step(
     return actions.reshape(action_shape), log_probs.reshape(b, n), new_h
 
 
+def n_critic_outputs(env) -> int:
+    """The critic's head width: one value per agent when the env's agents can
+    be paid differently (`per_agent_rewards`), else 1, the team value."""
+    return env.n_agents if per_agent_rewards(env) else 1
+
+
 def critic_step(critic_apply, params, cent_obs, h, mask, n_agents):
-    """The critic's value for every (env, agent) row. `cent_obs` `(B, gs_dim)`
-    is repeated for each agent. Returns `(values (B, N), h)`, values normalized."""
-    b = cent_obs.shape[0]
-    flat_h = h if h.ndim == 0 else h.reshape(b * n_agents, *h.shape[2:])
-    values, new_h = critic_apply(
-        params,
-        jnp.repeat(cent_obs, n_agents, axis=0),
-        flat_h,
-        jnp.repeat(mask, n_agents),
-    )
-    new_h = new_h if h.ndim == 0 else new_h.reshape(h.shape)
-    return values.reshape(b, n_agents), new_h
+    """Every (env, agent)'s value from one read of each env's centralized state
+    `cent_obs` `(B, gs_dim)`; `h` is per env `(B, recurrent_N, H)` or the
+    feedforward placeholder. Returns `(values (B, N), h)`, values normalized: the
+    head's value per agent, or its one team value for every agent."""
+    values, h = critic_apply(params, cent_obs, h, mask)
+    return jnp.broadcast_to(values, values.shape[:-1] + (n_agents,)), h
 
 
 def make_train(config: RMAPPOConfig, env):
@@ -134,6 +132,7 @@ def make_train(config: RMAPPOConfig, env):
     gs_dim = global_state_dim(env)
     _global_state = global_state_fn(env)
     recurrent = config.use_recurrent_policy
+    per_agent = per_agent_rewards(env)
 
     num_updates = int(config.n_total_steps) // (config.n_steps * config.n_envs)
 
@@ -155,7 +154,8 @@ def make_train(config: RMAPPOConfig, env):
         """`insert`: the hidden states of an env whose episode ended are zeroed."""
         if not recurrent:
             return h
-        return h * (1.0 - done.astype(jnp.float32))[:, None, None, None]
+        keep = 1.0 - done.astype(jnp.float32)
+        return h * keep.reshape(keep.shape + (1,) * (h.ndim - 1))
 
     # ------------------------------------------------------------------ init
 
@@ -163,17 +163,20 @@ def make_train(config: RMAPPOConfig, env):
     def init_fn(rng: jax.Array) -> RunnerState:
         rng, init_rng, reset_rng = jax.random.split(rng, 3)
         train_state = create_train_state(
-            init_rng, config, obs_dim, gs_dim, action_dim, discrete, num_updates
+            init_rng, config, obs_dim, gs_dim, action_dim, discrete, num_updates,
+            n_critic_outputs=n_critic_outputs(env),
         )
         obs, env_state = v_reset(jax.random.split(reset_rng, config.n_envs))
         hidden = zero_hidden(config, (config.n_envs, n_agents))
+        # The critic runs once per env, so it has one hidden state per env.
+        critic_hidden = zero_hidden(config, (config.n_envs,))
         return RunnerState(
             train_state=train_state,
             rng=rng,
             env_state=env_state,
             obs=obs,
             actor_h=hidden,
-            critic_h=hidden,
+            critic_h=critic_hidden,
             # warmup: the buffer's masks start as ones
             mask=jnp.ones((config.n_envs,)),
         )
@@ -206,14 +209,16 @@ def make_train(config: RMAPPOConfig, env):
             n_agents,
         )
 
-        next_obs, next_env_state, _, terminated, truncated, info = v_step(
+        next_obs, next_env_state, env_reward, terminated, truncated, info = v_step(
             env_state, actions
         )
         team_reward = info["task_reward"]
         done = jnp.logical_or(terminated, truncated)
-        # Every agent receives the shared team reward (on-policy's buffer holds
-        # one reward per agent).
-        reward = jnp.broadcast_to(team_reward[:, None], (config.n_envs, n_agents))
+        # on-policy's buffer holds one reward per agent: the env's own per-agent
+        # rewards, or the one team reward repeated for every agent.
+        reward = training_reward(env_reward, per_agent)
+        if reward.ndim == 1:
+            reward = jnp.broadcast_to(reward[:, None], (config.n_envs, n_agents))
         if config.use_proper_time_limits:
             # Value the real successor BEFORE the restart below overwrites it,
             # continuing the episode (mask 1) from the advanced hidden state.

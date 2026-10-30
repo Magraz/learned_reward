@@ -30,9 +30,9 @@ class Trajectory:
     headings: jax.Array  # (T+1, A)
     poi_remaining: jax.Array  # (T+1, P)
     actions: jax.Array  # (T, A, 2)
-    rewards: jax.Array  # (T,) team reward, or (T, A) if the reward is per-agent
+    rewards: jax.Array  # (T,) team reward (info["task_reward"], not step's per-rover reward)
     done: jax.Array  # (T,) bool, episode over after step t (stays True)
-    episode_return: jax.Array  # () sum of rewards (summed over agents if per-agent)
+    episode_return: jax.Array  # () sum of the team rewards
 
 
 def rollout_view_policy(env, policy, key):
@@ -51,13 +51,13 @@ def rollout_view_policy(env, policy, key):
     actions, rewards, dones = [], [], []
     for _ in range(env.max_steps):
         action = policy(obs)
-        obs, state, reward, terminated, truncated, _ = step(state, action)
+        obs, state, _, terminated, truncated, info = step(state, action)
         done = terminated | truncated
         positions.append(state.rovers.position)
         headings.append(state.rovers.heading)
         remaining.append(state.pois.remaining)
         actions.append(action)
-        rewards.append(reward)
+        rewards.append(info["task_reward"])
         dones.append(done)
         if bool(done):
             break
@@ -91,10 +91,10 @@ def rollout(env, policy_fn, key, params=None, n_steps=None):
     def body(carry, k):
         obs, state, done = carry
         actions = policy_fn(params, k, obs, state)
-        n_obs, n_state, reward, terminated, truncated, _ = env.step(state, actions)
+        n_obs, n_state, _, terminated, truncated, info = env.step(state, actions)
         n_state = jax.tree.map(lambda new, old: jnp.where(done, old, new), n_state, state)
         n_obs = jnp.where(done, obs, n_obs)
-        reward = jnp.where(done, jnp.zeros_like(reward), reward)
+        reward = jnp.where(done, 0.0, info["task_reward"])
         n_done = done | terminated | truncated
         record = (
             n_state.rovers.position,

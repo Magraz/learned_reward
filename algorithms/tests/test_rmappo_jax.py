@@ -6,8 +6,10 @@ They pin the places where a port of on-policy can be silently wrong:
 - `ValueNorm` against a transcription of on-policy's class;
 - the value and policy objectives;
 - recurrent re-evaluation: chunks rebuilt from the stored hidden states and
-  masks reproduce the rollout's log-probs and values exactly (PPO ratio 1),
-  including an episode that resets mid-chunk;
+  masks reproduce the rollout's log-probs (per (env, agent) chunk) and values
+  (per env chunk) exactly (PPO ratio 1), including an episode that resets
+  mid-chunk;
+- the critic: one read per env, a team value or one per agent;
 - batch-wide advantage normalization over active rows;
 - persistent rollouts, the time-limit handling, the n_steps rounding, the
   linear learning-rate decay, the rejections and the checkpoint round trip.
@@ -25,6 +27,8 @@ from algorithms.rmappo_jax import value_norm as vn_lib
 from algorithms.rmappo_jax.mappo import (
     _optimizer,
     chunk_count,
+    critic_chunk_count,
+    gather_critic_minibatch,
     gather_minibatch,
     policy_objective,
     prepare_advantages,
@@ -114,6 +118,16 @@ class DiscreteStub:
             "task_reward": reward,
             "active": active,
         }
+
+
+class PerAgentStub(ContinuousStub):
+    """`ContinuousStub` paying agent i (1 + i) times the team reward."""
+
+    per_agent_rewards = True
+
+    def step(self, state, actions):
+        obs, state, reward, *rest = super().step(state, actions)
+        return (obs, state, reward * (1.0 + jnp.arange(N_AGENTS)), *rest)
 
 
 def _config(**overrides):
@@ -318,41 +332,82 @@ def test_advantages_are_normalized_over_the_whole_batch_and_active_rows():
 
 
 def _reevaluate(train_state, trajectory, config, discrete, masks_override=None):
-    """Every chunk rebuilt by the training sampler and run from its stored
-    hidden state: `(log_prob, value)` per chunk row, plus the stored ones."""
+    """Every chunk rebuilt by the training samplers and run from its stored
+    hidden state: the actor's log-probs per (env, agent) chunk and the critic's
+    values per env chunk, plus both batches (holding the stored ones)."""
+    override = (lambda m: m) if masks_override is None else masks_override
     ids = jnp.arange(chunk_count(trajectory, config.chunk_length))
     zeros = jnp.zeros_like(trajectory.reward)
-    batch = gather_minibatch(trajectory, zeros, zeros, ids, config.chunk_length)
-    masks = batch["mask"] if masks_override is None else masks_override(batch["mask"])
+    batch = gather_minibatch(trajectory, zeros, ids, config.chunk_length)
     out = unroll(
         train_state.actor_ts.apply_fn, train_state.actor_ts.params,
-        batch["obs"], batch["actor_h0"], masks,
+        batch["obs"], batch["actor_h0"], override(batch["mask"]),
     )
     log_prob, _ = evaluate_action(out, batch["action"], discrete, batch["action_mask"])
 
-    def critic(params, x, h, m):
-        return train_state.critic_ts.apply_fn(params, x, h, m)
-
-    values = unroll(
-        critic, train_state.critic_ts.params, batch["cent_obs"], batch["critic_h0"], masks
+    critic_ids = jnp.arange(critic_chunk_count(trajectory, config.chunk_length))
+    critic_batch = gather_critic_minibatch(
+        trajectory, zeros, critic_ids, config.chunk_length
     )
-    return log_prob, values, batch
+    values = unroll(
+        train_state.critic_ts.apply_fn, train_state.critic_ts.params,
+        critic_batch["cent_obs"], critic_batch["critic_h0"],
+        override(critic_batch["mask"]),
+    )
+    values = jnp.broadcast_to(values, values.shape[:-1] + (N_AGENTS,))
+    return log_prob, values, batch, critic_batch
 
 
-@pytest.mark.parametrize("env", [ContinuousStub(), DiscreteStub()], ids=["cont", "disc"])
+@pytest.mark.parametrize(
+    "env", [ContinuousStub(), DiscreteStub(), PerAgentStub()],
+    ids=["cont", "disc", "per_agent"],
+)
 @pytest.mark.parametrize("recurrent", [True, False], ids=["gru", "mlp"])
 def test_chunked_reevaluation_reproduces_the_rollout(env, recurrent):
     config = _config(use_recurrent_policy=recurrent)
     runner_state, trajectory, _, _ = _collect(config, env, n_rollouts=2)
     assert float((trajectory.mask == 0).sum()) > 0  # episodes restart in-rollout
-    log_prob, values, batch = _reevaluate(
+    log_prob, values, batch, critic_batch = _reevaluate(
         runner_state.train_state, trajectory, config, env.discrete
     )
     np.testing.assert_allclose(
         np.asarray(log_prob), np.asarray(batch["old_log_prob"]), atol=1e-5
     )
     np.testing.assert_allclose(
-        np.asarray(values), np.asarray(batch["old_value"]), atol=1e-5
+        np.asarray(values), np.asarray(critic_batch["old_value"]), atol=1e-5
+    )
+
+
+@pytest.mark.parametrize(
+    "env, n_outputs", [(ContinuousStub(), 1), (PerAgentStub(), N_AGENTS)],
+    ids=["shared", "per_agent"],
+)
+@pytest.mark.parametrize("recurrent", [True, False], ids=["gru", "mlp"])
+def test_the_critic_reads_each_env_once_for_a_team_value_or_one_per_agent(
+    env, n_outputs, recurrent
+):
+    config = _config(use_recurrent_policy=recurrent)
+    runner_state, trajectory, last_value, (update_fn, _) = _collect(config, env)
+    ts = runner_state.train_state
+    head = ts.critic_ts.params["params"]["v_out"]["kernel"]
+    assert head.shape == (config.hidden_size, n_outputs)
+    assert trajectory.value.shape == (config.n_steps, config.n_envs, N_AGENTS)
+    assert last_value.shape == (config.n_envs, N_AGENTS)
+    if recurrent:  # one critic hidden state per env, not per (env, agent)
+        assert trajectory.critic_h.shape == (
+            config.n_steps, config.n_envs, config.recurrent_N, config.hidden_size
+        )
+    # a team value is every agent's; a per-agent head gives each its own
+    spread = float(jnp.abs(trajectory.value - trajectory.value[..., :1]).max())
+    assert (spread > 0) == (n_outputs > 1)
+    state, losses = update_fn(runner_state, trajectory, last_value)
+    assert all(np.isfinite(float(v)) for v in losses.values())
+    assert any(
+        float(jnp.abs(a - b).max()) > 0
+        for a, b in zip(
+            jax.tree.leaves(ts.critic_ts.params),
+            jax.tree.leaves(state.train_state.critic_ts.params),
+        )
     )
 
 
@@ -362,11 +417,12 @@ def test_ignoring_the_episode_masks_breaks_the_reevaluation():
     runner_state, trajectory, _, _ = _collect(config, ContinuousStub(), n_rollouts=2)
     in_chunk_reset = np.asarray(trajectory.mask).reshape(2, 5, -1)[:, 1:] == 0
     assert in_chunk_reset.any()
-    log_prob, _, batch = _reevaluate(
+    log_prob, values, batch, critic_batch = _reevaluate(
         runner_state.train_state, trajectory, config, False,
         masks_override=jnp.ones_like,
     )
     assert np.max(np.abs(np.asarray(log_prob - batch["old_log_prob"]))) > 1e-4
+    assert np.max(np.abs(np.asarray(values - critic_batch["old_value"]))) > 1e-4
 
 
 def test_first_minibatch_ratio_is_one():
@@ -509,11 +565,28 @@ def test_mappo_jax_model_group_is_rejected():
         Model_Params(hidden_dim=168)
 
 
-def test_per_agent_rewards_and_unshared_policies_are_rejected():
-    env = ContinuousStub()
-    env.reward_mode = "difference_rewards"
-    with pytest.raises(NotImplementedError, match="per agent"):
-        make_train(_config(), env)
+@pytest.mark.parametrize("per_agent", [False, True], ids=["shared", "per_agent"])
+def test_the_buffer_holds_the_envs_reward_for_each_agent(per_agent):
+    """An env's per-agent rewards reach the buffer as they are; an env paying
+    every agent the same through a per-agent array is trained on that value."""
+    scale = 1.0 + jnp.arange(N_AGENTS) if per_agent else jnp.ones(N_AGENTS)
+
+    class Stub(ContinuousStub):
+        per_agent_rewards = per_agent
+
+        def step(self, state, actions):
+            obs, state, reward, *rest = super().step(state, actions)
+            return (obs, state, reward * scale, *rest)
+
+    _, trajectory, _, _ = _collect(_config(), Stub())
+    np.testing.assert_allclose(
+        np.asarray(trajectory.reward),
+        np.asarray(trajectory.team_reward)[:, :, None] * np.asarray(scale),
+        rtol=1e-6,
+    )
+
+
+def test_unshared_policies_and_unchunked_rollouts_are_rejected():
     with pytest.raises(NotImplementedError, match="shared policy"):
         make_train(_config(parameter_sharing=False), ContinuousStub())
     with pytest.raises(ValueError, match="not a multiple"):

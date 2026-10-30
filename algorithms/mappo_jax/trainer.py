@@ -74,11 +74,13 @@ def global_state_fn(env):
 
 
 def per_agent_rewards(env) -> bool:
-    """Whether `env`'s `step` reward is per agent rather than a team scalar.
+    """Whether `env`'s agents can receive different rewards.
 
-    The macro wrapper says so directly (`per_agent_rewards`); the box-push envs
-    are per agent only under `reward_mode="difference_rewards"`. An env with
-    neither attribute (the rover domain) returns a team scalar.
+    True gives the learner one value per agent. An env says so with a
+    `per_agent_rewards` attribute (the rover domain: false under its shared
+    reward, true under difference rewards); without one, only
+    `reward_mode="difference_rewards"` counts. When false, `step` may still
+    return one reward per agent, all equal; `training_reward` takes one.
     """
     return bool(
         getattr(
@@ -87,6 +89,19 @@ def per_agent_rewards(env) -> bool:
             getattr(env, "reward_mode", None) == "difference_rewards",
         )
     )
+
+
+def training_reward(reward, per_agent: bool):
+    """The reward the learner trains on, from `step`'s vmapped `reward`.
+
+    `(n_envs,)` team rewards and `(n_envs, n_agents)` rewards under `per_agent`
+    pass through. An `(n_envs, n_agents)` reward without `per_agent` holds the
+    same value for every agent (the rover domain's shared reward), so agent 0's
+    column is the team reward and the learner keeps a single team value.
+    """
+    if not per_agent and reward.ndim == 2:
+        return reward[:, 0]
+    return reward
 
 
 def restart_done_envs(v_reset, reset_rng, n_envs, done, obs, env_state):
@@ -296,6 +311,7 @@ def make_train(config: MAPPOConfig, env):
         # `reward` is what the learner optimizes (team scalar, or per-agent
         # difference rewards); `task_reward` is always the team scalar, so logged
         # returns stay comparable across reward modes.
+        reward = training_reward(reward, config.per_agent_rewards)
         team_reward = info["task_reward"]
         done = jnp.logical_or(terminated, truncated)
 

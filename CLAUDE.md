@@ -65,6 +65,11 @@ renders; `mappo_jax` with `model=mlp` trains and renders.
 
 ### Loose ends (not fixed)
 
+- `conf/model/mlp.yaml` is missing again (found 2026-10-30, after the restore
+  above; never committed), so `algorithm=mappo_jax model=mlp` fails with
+  `Could not find 'model/mlp'`. Its content was `# @package _global_` and
+  `model_params: {hidden_dim: 168}`.
+
 - `conf/algorithm/mappo.yaml` and `mappo_vanilla.yaml` remain, but `_dispatch`
   has no case for them: `algorithm=mappo` ends in an `UnboundLocalError` on
   `runner`.
@@ -393,10 +398,14 @@ is the rover domain.
     placeholder, and `ppo_update` switches on `action_mask.ndim == 4`.
   - `info["active"]`: per-agent mask removing inactive agents from the losses;
     defaults to all-ones.
-  - `per_agent_rewards(env)`: a per-agent reward (an env with
-    `per_agent_rewards`, or `reward_mode == "difference_rewards"`) switches the
-    critic to a per-agent value head and GAE to the agent axis. Rover returns a
-    team scalar. `Transition.team_reward` always carries the team scalar for
+  - `per_agent_rewards(env)`: whether the env's agents can be paid differently
+    (an env's `per_agent_rewards` attribute, else
+    `reward_mode == "difference_rewards"`). True switches the critic to a
+    per-agent value head and GAE to the agent axis; rover is true under
+    `difference_rewards` only. `step` may return one reward per agent even when
+    false (rover's `shared_reward`): `trainer.training_reward` then trains on
+    agent 0's column, which is the team reward, with one team value. Both
+    stacks call it. `Transition.team_reward` always carries the team scalar for
     logging and evaluation.
 - **Outputs**: params as flax msgpack (`models/models_{checkpoint,finished}.msgpack`).
   **Resume** (`checkpoint=true`): the stats checkpoint restores the progress
@@ -427,7 +436,11 @@ is the rover domain.
   ```
 - **Smoke-verified 2026-10-30** on `rover_2poi_c2` (CPU, `trial_id=smoke`):
   one 33,536-step update in 1.9 s including compilation, and `view=true`. **No
-  training result.**
+  training result.** Again after the reward modes (2026-10-30, 2 updates each,
+  `mlp` from a scratch search path): `shared_reward` saves a critic with 1
+  output, `difference_rewards` one with 4 (per rover). `rmappo_jax` trains in
+  both modes, and an existing `rmappo` run (`rover_2poi_c2` trial 0) still
+  loads and evaluates to 2.00, its logged final reward.
 
 ### Reference MAPPO (`algorithms/rmappo_jax/`, added 2026-10-27)
 
@@ -469,16 +482,30 @@ uv run python train.py algorithm=rmappo_jax env=rover_2poi_c2 model=mappo_mlp tr
   GRU hidden states and the episode mask carry over between updates in
   `RunnerState`. A finished env restarts at once; its hidden states are zeroed
   and its next mask is 0.
-- **Critic input** (on-policy's MPE runner): every agent row gets the
-  centralized state (`mappo_jax.trainer.global_state_fn`), the critic emits one
-  value per (env, agent) row, and every agent receives the team reward. The
-  state is stored once per (step, env) and repeated per agent only when a
-  minibatch is gathered.
+- **Critic input**: the centralized state (`mappo_jax.trainer.global_state_fn`;
+  the concatenated observations for rover, as on-policy's MPE runner builds).
+  Every agent receives the team reward, or its own reward when
+  `per_agent_rewards(env)` (on-policy's buffer holds one reward per agent;
+  through `mappo_jax.trainer.training_reward`).
+  - **One read per env** (2026-10-30, not on-policy's, see Deliberate
+    deviations): `trainer.critic_step` runs the critic once on each env's
+    state, with one GRU hidden state per env (`critic_h`
+    `(n_envs, recurrent_N, H)`). Its head (`trainer.n_critic_outputs`) emits
+    one team value, kernel `(hidden, 1)`, or one value per agent under
+    `per_agent_rewards(env)` (rover `difference_rewards`), kernel
+    `(hidden, n_agents)`. A team value is broadcast to every agent, so
+    values, GAE, the loss and ValueNorm stay per (env, agent) row as in
+    on-policy, active masks included.
+  - The update trains the critic on per-env chunks
+    (`mappo.gather_critic_minibatch`, its own permutation from
+    `fold_in(epoch key, 1)`, split into the same `n_minibatches`); the actor
+    keeps its (env, agent) chunks (`mappo.gather_minibatch`).
 - **GAE on denormalized values**, per agent (`mappo_jax.mappo.compute_gae`,
   whose `1 - done[t]` is on-policy's `masks[t + 1]`).
 - **Advantage normalization** is batch-wide: mean and population std over the
   active rows of the whole (time × env × agent) batch, `+ 1e-5` on the std.
-- **Samplers** (`mappo.gather_minibatch`): recurrent = each (env, agent)
+- **Samplers** (`mappo.gather_minibatch`, the actor's; the critic's are per
+  env, see Critic input): recurrent = each (env, agent)
   trajectory cut into `data_chunk_length` chunks in on-policy's order, each
   starting from the hidden state stored at its first step; feedforward = chunks
   of length 1. A fresh permutation every epoch, remainder dropped. Inside a
@@ -503,6 +530,13 @@ uv run python train.py algorithm=rmappo_jax env=rover_2poi_c2 model=mappo_mlp tr
   an update.
 
 **Deliberate deviations:**
+- The critic reads each env's centralized state once, with one hidden state
+  per env, emitting a team value or one per agent (see Critic input).
+  on-policy repeats the state for every agent row, which gives every agent the
+  same value and so cannot serve per-agent rewards. Under a shared reward the
+  two compute the same function; the random draws, the critic's minibatches
+  and its chunk order differ, so runs before 2026-10-30 (every rover result on
+  disk) are not reproduced exactly.
 - `reward` is this repo's deterministic evaluation (`n_eval_episodes` 32, every
   `eval_interval` = 25 updates). It does not affect training.
 - Under the GRU `n_steps` is rounded up to a multiple of `data_chunk_length`
@@ -512,8 +546,7 @@ uv run python train.py algorithm=rmappo_jax env=rover_2poi_c2 model=mappo_mlp tr
   and the RNG chains, but restarts episodes and hidden states. The checkpoint
   stores `config_meta` (the shape-free settings in `run.META_FIELDS`); resuming
   under different values raises and names them.
-- Refused: per-agent reward modes (every agent row has the same critic input,
-  so the critic could only learn the mean) and `parameter_sharing: false`.
+- Refused: `parameter_sharing: false`.
 - Not ported: PopArt (adaptive value-target normalization), the naive
   recurrent policy, the convolutional (CNN) base, stacked frames,
   other action spaces, `weight_decay`, Xavier init, SMAC-specific options.
@@ -525,13 +558,14 @@ i.e. ~5× the updates, each of 15 full-batch epochs. To separate the two, add a
 model group with `mappo_jax`'s hyperparameters (in a model group, never on the
 command line, because of the results path).
 
-⚠ **Memory:** the critic input is repeated for every agent row, so with
-on-policy's single minibatch a group with many agents and a wide concatenated
-state can fill a GPU (measured 12.3 GB at 16 agents with a 640-wide state on a
-removed MJX group; 5.4 GB with `n_minibatches: 4`). Rover's state is
+⚠ **Memory:** before 2026-10-30 the critic input was repeated for every
+agent row, and with on-policy's single minibatch a group with many agents and a
+wide concatenated state could fill a GPU (measured 12.3 GB at 16 agents with a
+640-wide state on a removed MJX group; 5.4 GB with `n_minibatches: 4`). The
+critic now reads it once per env; not re-measured. Rover's state is
 `16 * n_agents` wide (256 at 16 rovers).
 
-**Checks:** `uv run pytest algorithms/tests/test_rmappo_jax.py -q` (28 tests,
+**Checks:** `uv run pytest algorithms/tests/test_rmappo_jax.py -q` (36 tests,
 CPU stubs). They cover the GRU against
 torch's `nn.GRU` through on-policy's `RNNLayer`, ValueNorm against a numpy
 transcription, Huber/mse, the clipped value `max`, inactive rows, batch-wide
@@ -539,7 +573,12 @@ normalization, recurrent re-evaluation reproducing the rollout's log-probs to
 1e-5 (with a negative control), a first-minibatch ratio of exactly 1,
 persistent rollouts, both time-limit modes, no bootstrap after termination,
 masked actions, end-to-end runs, `n_steps` rounding, the defaults, the
-rejections, the decay schedule, and the checkpoint round trip.
+rejections, the decay schedule, the checkpoint round trip, each agent's reward
+in the buffer (shared and per agent), and the critic's single read per env
+(head width 1 or `n_agents`, one hidden state per env, a team value identical
+across agents, an update that moves it). Re-evaluation covers the critic's
+per-env chunks for a team head and a per-agent head, and the masks negative
+control breaks both the actor's log-probs and the critic's values.
 `algorithms/tests/test_rover_trained_view.py` (3 tests) checks that
 `rollout_view_policy` + `RecurrentViewPolicy` reproduce an independent
 functional rollout (both model types), reset the GRU between episodes, and stop
@@ -559,7 +598,15 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   - The base group sets a literal `n_envs: 32`, inherited by every variant.
     `make_rover_env` accepts it as a runner key (`config._RUNNER_KEYS`) and
     ignores it.
-  - No `reward_mode`, so `per_agent_rewards(env)` is false: team reward.
+  - What each rover trains on is `env.reward.mode` (see Default reward):
+    `shared_reward` (default; `per_agent_rewards(env)` false, so both stacks'
+    critics emit one team value) or `difference_rewards` (true: one value per
+    rover). Both critics read the state once per env. Both runners print
+    `reward_mode=`.
+  - ⚠ The mode is not in the results path
+    (`<env group>/<model group>/<trial>`). `env.reward.mode=...` on the command
+    line trains into the shared-reward runs' directories, and with
+    `checkpoint=true` it resumes them. Give each mode its own env group.
   - No global-state hook: the critic reads the concatenated observations
     (64 dims at 4 rovers).
   - `view=true` writes the arena and trajectory PNGs (see JAX MAPPO).
@@ -577,10 +624,14 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
 - **Contract** (the functional API above, serving evolutionary algorithms and
   RL alike): `step` takes no PRNG key (dynamics are deterministic). Attributes
   `n_agents`, `n_pois`, `observation_dim`, `action_dim = 2`, `discrete = False`,
-  `max_steps`, `world_size`, `world_diagonal`, `spawn_region`. `info` carries
+  `max_steps`, `world_size`, `world_diagonal`, `spawn_region`,
+  `per_agent_rewards`, `reward_mode`. `step`'s reward has shape
+  `(n_agents,)` in every mode; `info["task_reward"]` is the team reward `G`,
+  which evaluation, logging and rollouts score. `info` carries
   `task_reward`, `agent_positions`, `agent_headings`, `agent_speeds`,
-  `poi_remaining`, plus the reward model's keys (`agent_rewards`,
-  `poi_observed`, `poi_active`, `poi_payout`). State (`state.py`) is a flat
+  `poi_remaining`, plus the reward model's keys (`shared_reward`,
+  `difference_rewards`, `poi_observed`, `poi_active`, `poi_payout`). State
+  (`state.py`) is a flat
   pytree of arrays: `RoverEnvState(rovers=RoverState(position, heading),
   pois=POIState(position, coupling, radius, value, rate, remaining), t)`.
 - **Dynamics** (`BaseRoverEnv.move`). Action `a = [turn, speed]` in `[-1, 1]²`:
@@ -612,8 +663,27 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
     that much; extra rovers add nothing;
   - budgets below 1e-6 snap to 0, so value 1.0 / rate 0.05 depletes in exactly
     20 coupled steps;
-  - `step` returns the team scalar `G`; `info["agent_rewards"]` splits each
-    payout equally among the rovers observing that POI (sums to `G`);
+  - the team reward `G` is the sum of payouts (`RewardOutput.team_reward`,
+    `info["task_reward"]`). `info["shared_reward"]` is `G` for every rover; it
+    replaced `info["agent_rewards"]` (each payout split equally among the
+    rovers observing it) on 2026-10-30;
+  - `CouplingDepletionReward(mode)` (yaml `reward.mode`, default
+    `shared_reward`) picks `step`'s per-rover reward by its info key:
+    `shared_reward` or `difference_rewards`. Both are in `info` in either
+    mode. It sets `per_agent_rewards = (mode != "shared_reward")`; an unknown
+    mode raises;
+  - `info["difference_rewards"]` (added 2026-10-30) is each rover's
+    difference reward `D_i = G − G_{−i}`: this step's team reward minus the one
+    with rover i removed, the other rovers and the POI budgets unchanged.
+    - Removing rover i lowers the count of every POI it observes by one, so
+      `D_i` is the payout of the POIs whose coupling it completes exactly.
+      Computed as a batch of counterfactual counts through the same
+      `_payout` rule as `G`.
+    - A rover beyond a POI's coupling earns 0 from it (where the equal split
+      still paid it); so does a rover waiting alone at a POI whose coupling is
+      not met. The `D_i` need not sum to `G`.
+    - It is per step: the counterfactual does not replay how the missing rover
+      would have changed later budgets;
   - `terminated` = every POI used up; `truncated = (t ≥ max_steps) &
     ~terminated`, so the two never fire together.
 - **Pluggable components** (`components.py`): `BaseRoverEnv(n_agents, pois,
@@ -621,12 +691,16 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   - `POIModel`: `init(key, env)`; `step(pois, rovers, t)` (identity by default,
     the hook for moving POIs); `validate(env)`;
   - `ObservationModel`: `obs_dim` and `__call__(env, state)`;
-  - `RewardModel`: `__call__(env, rovers, pois) -> RewardOutput(reward, pois,
-    terminated, info)`; it returns the updated `POIState`, since depletion is
-    part of the reward's semantics.
+  - `RewardModel`: `__call__(env, rovers, pois) -> RewardOutput(reward,
+    team_reward, pois, terminated, info)`: `reward` `(n_agents,)` is what the
+    rovers train on, `team_reward` `()` what evaluation scores (kept apart
+    because difference rewards do not sum to `G`). It returns the updated
+    `POIState`, since depletion is part of the reward's semantics. Class
+    attribute `per_agent_rewards` (default true; false = every rover is
+    always paid the same).
 
-  `__init__` checks the declared `obs_dim` against the emitted width with
-  `jax.eval_shape`. Register a new implementation in `config.py`
+  `__init__` checks the declared `obs_dim` against the emitted width, and the
+  reward shapes, with `jax.eval_shape`. Register a new implementation in `config.py`
   (`POI_MODELS` / `OBSERVATIONS` / `REWARDS`, keyed by the block's `type:`) to
   make it selectable from yaml.
 - **Config: one Hydra env group per POI layout (variant).**
@@ -644,6 +718,11 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   | `rover_6poi_c3_ring` | 6 | 10×10 | 2.0 | 6 of coupling 3 on a radius-3.5 ring |
   | `rover_6poi_c8-4-4-8-4-4` | 16 | 20×20, spawn `[8,12]²` | 4.0 | (10,12) 8, (15,17) 4, (5,17) 4, (10,8) 8, (15,3) 4, (5,3) 4 |
 
+  `rover_2poi_c8_diffrew` (2026-10-30) is `rover_2poi_c8` with
+  `reward.mode: difference_rewards`, its own results path. Smoke-verified
+  under `rmappo_jax` (2 updates, CPU): critic head `(64, 16)`, reload through
+  `evaluate=true`.
+
   `load_env_config` composes `conf/config.yaml` with `env=<variant>`, the same
   path as `train.py`. `make_rover_env` raises on
   unknown `env:` keys, unknown `dynamics` keys, unknown component types and
@@ -653,7 +732,9 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   - `rollout(env, policy_fn, key, params=None, n_steps=None)` is a `lax.scan`
     over `max_steps` (or `n_steps`). The state is frozen after the episode ends
     and later rewards are 0. Returns a `Trajectory` (positions, headings,
-    `poi_remaining`, actions, rewards, `done`, `episode_return`) and vmaps over
+    `poi_remaining`, actions, rewards, `done`, `episode_return`; `rewards` is
+    the team reward `info["task_reward"]`, not `step`'s per-rover reward) and
+    vmaps over
     keys or over policy parameters (evolutionary fitness).
     `policy_fn(params, key, obs, state)`.
   - `rollout_reset(env, key)` returns the initial state `rollout` starts from,
@@ -722,11 +803,16 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   (multi-agent particle environment) demo with random actions; it is not part
   of the rover domain and nothing imports it. It is the only remaining user of
   the `jaxmarl` package.
-- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (35 tests,
+- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (42 tests,
   CPU). They cover shapes, jit and vmap; the sector frame and ±22.5° boundaries; exact
   presence values; co-located teammates; invisible used-up POIs; observations in
   [0, 1] over random rollouts of every variant; turn/speed mapping, heading
-  wrap, wall clip; coupling and the inclusive radius; the payout split;
+  wrap, wall clip; coupling and the inclusive radius; the shared reward;
+  both reward modes (`step`'s reward = `info[mode]`, team reward `G`), a
+  scored rollout under `difference_rewards` (2.0, not `Σ D_i` = 4.0), a
+  reward model without one reward per rover rejected, an unknown mode;
+  difference rewards (hand-worked cases, and `G − G_{−i}` recomputed with each
+  rover deleted over 64 random layouts of `rover_4poi_c1234`);
   depletion after exactly value/rate steps; termination needing every POI;
   truncation never firing with termination; custom components and a wrong
   `obs_dim` being rejected; variant composition (dynamics and observation type
