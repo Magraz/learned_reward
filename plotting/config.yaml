@@ -1,6 +1,6 @@
 #Experiment config
 moving_avg_window_size: 1
-base_path: "/home/magraz/morphology-learning/experiments/results"
+base_path: "/home/magraz/learned_reward/experiments/results"
 
 batches: ["rover_2poi_c2"]
 

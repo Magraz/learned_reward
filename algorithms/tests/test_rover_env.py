@@ -340,9 +340,14 @@ def test_every_rover_variant_composes_and_builds():
         cfg = load_env_config(variant)
         env = make_rover_env(cfg)
         assert env.observation_dim == 16
-        # children override only the POIs (and the team size); dynamics are inherited
+        # Children override the POIs, the team size, the arena and the sensor
+        # radius; the dynamics and the rest of the observation are inherited.
         assert cfg["dynamics"] == default["dynamics"]
-        assert cfg["observation"] == default["observation"]
+        observation = {k: v for k, v in cfg["observation"].items() if k != "sensor_radius"}
+        default_observation = {
+            k: v for k, v in default["observation"].items() if k != "sensor_radius"
+        }
+        assert observation == default_observation
 
 
 def test_default_variant_is_two_pois_of_coupling_two():

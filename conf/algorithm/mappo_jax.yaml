@@ -1,6 +1,6 @@
 # @package _global_
 # JAX MAPPO (algorithms/mappo_jax): logically mirrors mappo_vanilla, but runs
-# fully jitted over the functional MJX envs (env=multi_box_push_mjx_* only).
+# fully jitted over functional JAX envs (env=rover_* only). Pair with model=mlp.
 # Same params surface as mappo_vanilla so the two are drop-in comparable.
 algorithm: mappo_jax
 params:

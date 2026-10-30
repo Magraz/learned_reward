@@ -1,17 +1,21 @@
 # Hydra composition root. A run = algorithm × env × model × seeds.
 #
-#   uv run python train.py env=multi_box_push_9a_3o model=hgnn_mix trial_id=0
-#   uv run python train.py -m model=mlp_shared,gnn_critic trial_id=0,1,2   # sweep
+#   uv run python train.py env=rover_4poi_c1234 model=mappo_mlp trial_id=0
+#   uv run python train.py -m model=rmappo,mappo_mlp trial_id=0,1,2   # sweep
+#   uv run python train.py algorithm=mappo_jax model=mlp trial_id=0
+#
+# The defaults below are a runnable combination: only the JAX stacks can build
+# the rover domain, and model=rmappo / mappo_mlp belong to rmappo_jax
+# (model=mlp to mappo_jax).
 #
 # Group order below sets inter-group precedence (later wins): algorithm supplies
-# the base params/model_params, env overrides env-scoped params (val_coef,
-# n_total_steps) + publishes the `hyperedges` map, model overrides model_params,
-# seeds injects params.random_seeds. `_self_` last lets this file's top-level
-# keys win.
+# the base params/model_params, env overrides env-scoped params (e.g.
+# n_total_steps), model overrides model_params, seeds injects
+# params.random_seeds. `_self_` last lets this file's top-level keys win.
 defaults:
-  - algorithm: mappo
-  - env: multi_box_push_9a_3o
-  - model: mlp_shared
+  - algorithm: rmappo_jax
+  - env: rover_2poi_c2
+  - model: rmappo
   - seeds: standard
   - _self_
 

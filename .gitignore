@@ -15,6 +15,6 @@
 *.TXT
 outputs
 logs
-feudal_goal_analysis
-presentations
+references
+.claude
 __pycache__

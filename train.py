@@ -4,8 +4,8 @@ Composes a run from the `conf/` groups (algorithm × env × model × seeds) and
 hands the resolved config to the shared `_dispatch` in `algorithms.algorithms`.
 This is the sole entry point; the legacy `run_trial.py` yaml path was retired.
 
-    uv run python train.py env=multi_box_push_9a_3o model=hgnn_mix trial_id=0
-    uv run python train.py -m model=mlp_shared,gnn_critic trial_id=0,1,2
+    uv run python train.py env=rover_4poi_c1234 model=mappo_mlp trial_id=0
+    uv run python train.py -m model=rmappo,mappo_mlp trial_id=0,1,2
 
 Output paths are preserved: results land in
 `experiments/results/<env-choice>/<model-choice>/<trial_id>/`, matching the old

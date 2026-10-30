@@ -1,11 +1,11 @@
-"""Runner for JAX MAPPO over the functional MJX envs.
+"""Runner for JAX MAPPO over functional JAX envs (currently the rover domain).
 
 Mirrors ``MAPPO_Vanilla_Runner`` + ``VecMAPPOTrainer.train``: same per-iteration
 collect → update → deterministic-eval cadence, the same
 ``TrainingStatsTracker`` stats/pickle format (so the plotting notebooks read the
-output unchanged), and the same results layout. Differences: params are saved
-as flax msgpack (``models_*.msgpack``) instead of torch ``.pth``, and
-checkpoint *resume* is not implemented (checkpoints are still written).
+output unchanged), and the same results layout. Params are saved as flax
+msgpack (``models_*.msgpack``) instead of torch ``.pth``; ``checkpoint=true``
+resumes from ``models/train_checkpoint.msgpack``.
 
 Deliberately does not subclass ``algorithms.runner.Runner``: that base imports
 torch at module load and halves the torch thread pool, neither of which this
@@ -29,10 +29,6 @@ from algorithms.mappo_jax.trainer import (
     per_agent_rewards,
 )
 from algorithms.mappo_jax.types import Experiment, MAPPOConfig, Model_Params, Params
-from environments.mjx_suite.multi_box_multi_goal_push_mjx import (
-    MultiBoxMultiGoalPushMJX,
-)
-from environments.mjx_suite.multi_box_push_mjx import MultiBoxPushMJX
 from environments.types import EnvironmentEnum
 
 
@@ -82,99 +78,13 @@ class StatelessViewPolicy:
 def make_env(env_config: dict):
     """Build the functional JAX env named by an `env:` config block.
 
-    Shared by every runner built on this stack (`mappo_jax` and
-    `simplified_feudal_mappo_jax`), so an `env:` key is wired in one place.
+    Shared by every runner built on this stack (`mappo_jax` and `rmappo_jax`),
+    so an `env:` key is wired in one place. Add a branch per new environment,
+    passing its constructor arguments explicitly.
     """
-    # Create the functional MJX environment. Three supported env groups:
-    #   MULTI_BOX_MJX            — continuous force control (the base env)
-    #   MULTI_BOX_MULTI_GOAL_MJX — the same task on a circular arena with one
-    #                   concentric goal ring per box (box j -> ring j from the
-    #                   center out); same 40-dim obs, action space and reward
-    #                   modes, so nothing downstream changes
-    #   MACRO_MJX     — the hierarchical macro layer (discrete skill choice,
-    #                   one decision per macro_len low-level steps), which
-    #                   wraps a base MultiBoxPushMJX.
-    # `coupling_def` is forwarded to every branch that builds a box-push env
-    # (bare, multi-goal, and the macro wrapper's base). Default "even" ==
-    # n_agents // n_objects for every box, i.e. exactly what each group got
-    # before this was reachable — so no existing arm changes. "random" draws
-    # per-box requirements in [2, n_agents//2] from a FIXED rng(42), which
-    # also resizes the boxes (`box_half_extents = max(1.5, coupling*0.4)`)
-    # and, in the multi-goal env, the goal rings derived from them.
     environment = env_config.get("environment")
-    reward_mode = env_config.get("reward_mode", "dense")
 
-    if environment == EnvironmentEnum.MULTI_BOX_MJX:
-        env = MultiBoxPushMJX(
-            n_agents=env_config.get("n_agents"),
-            n_objects=env_config.get("n_objects"),
-            reward_mode=reward_mode,
-            variant=env_config.get("variant"),
-            coupling_def=env_config.get("coupling_def", "even"),
-            arena_scale=env_config.get("arena_scale", 1.0),
-            use_global_state=env_config.get("use_global_state", False),
-        )
-    elif environment == EnvironmentEnum.MULTI_BOX_MULTI_GOAL_MJX:
-        env = MultiBoxMultiGoalPushMJX(
-            n_agents=env_config.get("n_agents"),
-            n_objects=env_config.get("n_objects"),
-            reward_mode=reward_mode,
-            boundary_ends_episode=env_config.get("boundary_ends_episode", False),
-            coupling_def=env_config.get("coupling_def", "even"),
-        )
-    elif environment == EnvironmentEnum.MACRO_MJX:
-        from environments.mjx_suite.macro_wrapper import (
-            ALIGNED_WINDOWED_DIFFERENCE_REWARDS,
-            WINDOWED_DIFFERENCE_REWARDS,
-            SyncMacroMJX,
-        )
-
-        # The windowed difference rewards (global-window and decision-aligned)
-        # are computed by the wrapper (it forks macro windows per agent), so the
-        # base env must stay dense — it must not also emit its own per-step D.
-        # The single-step "difference_rewards" mode instead lives on the base
-        # env and passes through the wrapper's accumulation.
-        base_reward_mode = (
-            "dense"
-            if reward_mode
-            in (WINDOWED_DIFFERENCE_REWARDS, ALIGNED_WINDOWED_DIFFERENCE_REWARDS)
-            else reward_mode
-        )
-        base_env = MultiBoxPushMJX(
-            n_agents=env_config.get("n_agents"),
-            n_objects=env_config.get("n_objects"),
-            reward_mode=base_reward_mode,
-            variant=env_config.get("variant"),
-            coupling_def=env_config.get("coupling_def", "even"),
-            arena_scale=env_config.get("arena_scale", 1.0),
-        )
-        env = SyncMacroMJX(
-            base_env,
-            macro_len=env_config.get("macro_len", 10),
-            reward_mode=reward_mode,
-            # Staggered-starts async study: agents come online at random
-            # low-level steps and decide on their own phase (max_start_delay in
-            # low-level steps). Off by default -> ordinary lockstep options env.
-            stagger_starts=env_config.get("stagger_starts", False),
-            max_start_delay=env_config.get("max_start_delay", 0),
-        )
-    elif environment == EnvironmentEnum.SMAX:
-        # JaxMARL StarCraft, behind an adapter that presents the same functional
-        # array contract as the MJX envs. It brings three things the MJX envs do
-        # not: legal-action masks, a real global state, and units that die
-        # mid-episode (masked out of the loss via info["active"]).
-        # `max_steps` is the benchmark's own episode limit, NOT params.n_steps —
-        # unlike the MJX branches above, the two are independent here.
-        from environments.smax.smax_env import SMAXAdapter
-
-        env = SMAXAdapter(
-            map_name=env_config.get("env_variant", "3m"),
-            smax_env_id=env_config.get("smax_env_id", "HeuristicEnemySMAX"),
-            max_steps=env_config.get("max_steps"),
-            walls_cause_death=env_config.get("walls_cause_death", True),
-            use_self_play_reward=env_config.get("use_self_play_reward", False),
-        )
-    elif environment == EnvironmentEnum.ROVER:
+    if environment == EnvironmentEnum.ROVER:
         # The pure-JAX rover domain (environments/rover): team reward, continuous
         # turn/speed actions, no global-state hook (the critic reads the
         # concatenated observations). Its own builder validates the whole `env:`
@@ -184,10 +94,8 @@ def make_env(env_config: dict):
         env = make_rover_env(env_config)
     else:
         raise ValueError(
-            f"mappo_jax supports only '{EnvironmentEnum.MULTI_BOX_MJX}', "
-            f"'{EnvironmentEnum.MULTI_BOX_MULTI_GOAL_MJX}', "
-            f"'{EnvironmentEnum.MACRO_MJX}', '{EnvironmentEnum.SMAX}' and "
-            f"'{EnvironmentEnum.ROVER}' (functional JAX API); got {environment!r}"
+            f"mappo_jax supports only '{EnvironmentEnum.ROVER}' "
+            f"(functional JAX API); got {environment!r}"
         )
     return env
 
@@ -215,10 +123,9 @@ class MAPPO_JAX_Runner:
         self.env = make_env(env_config)
         environment = env_config.get("environment")
 
-        # A per-agent reward (single-step or windowed difference rewards) switches
-        # the critic to a per-agent value head and runs GAE on the agent axis (see
-        # MAPPOConfig.per_agent_rewards). The macro wrapper exposes the flag
-        # directly; the base env is per-agent only under "difference_rewards".
+        # A per-agent reward switches the critic to a per-agent value head and
+        # runs GAE on the agent axis (see MAPPOConfig.per_agent_rewards). The
+        # rover domain pays a team reward, so this is False there.
         per_agent = per_agent_rewards(self.env)
 
         n_envs = env_config.get("n_envs")
@@ -316,7 +223,7 @@ class MAPPO_JAX_Runner:
         return StatelessViewPolicy(train_state, self.env)
 
     def train(self):
-        from algorithms.mappo_vanilla.trainer_components import TrainingStatsTracker
+        from algorithms.mappo_jax.stats_tracker import TrainingStatsTracker
 
         init_fn, collect_fn, update_fn, eval_fn, num_updates = self._make_train()
         steps_per_update = self._steps_per_update()
@@ -531,123 +438,18 @@ class MAPPO_JAX_Runner:
     # ------------------------------------------------------------------ view / eval
 
     def view(self):
-        """Render deterministic episodes with the trained policy (vanilla view)."""
+        """Render deterministic episodes with the trained policy.
+
+        Only the rover domain has a renderer (`_view_rover`): arena and
+        trajectory figures. A new environment needs its own branch here.
+        """
         from environments.rover.base import BaseRoverEnv
 
         if isinstance(self.env, BaseRoverEnv):
             return self._view_rover()
-
-        # Envs that bring their own renderer (SMAX) take a separate path: the MJX
-        # renderers below are not generic — they read world_width, sector_sensor_radius,
-        # objects_push_coupling_list, _build_xml(), state.data.qpos and hardcoded MJX
-        # observation-slice constants off the env.
-        if hasattr(self.env, "render_episode"):
-            return self._view_with_env_renderer()
-
-        import imageio
-        import matplotlib.pyplot as plt
-
-        from environments.mjx_suite.renderer import MJXRenderer, MuJoCoNativeRenderer
-
-        train_state = self._load_train_state()
-        policy_fn = self._view_policy(train_state)
-        # The macro env's state is the base EnvState, so the renderers (which
-        # expect a MultiBoxPushMJX) run on the wrapped base env.
-        is_macro = hasattr(self.env, "macro_len")
-        render_env = getattr(self.env, "env", self.env)
-        renderer = MJXRenderer(render_env)
-        try:
-            native_renderer = MuJoCoNativeRenderer(render_env)
-        except Exception as e:  # no GL context (run with MUJOCO_GL=egl headless)
-            print(f"Native MuJoCo renderer unavailable ({e}); skipping native videos")
-            native_renderer = None
-        reset_fn = jax.jit(self.env.reset)
-        step_fn = jax.jit(self.env.step)
-
-        def _draw(state, obs):
-            """Append one rendered frame (+ native) for the given base state."""
-            frames.append(renderer.render(state, obs=np.asarray(obs)))
-            if native_renderer is not None:
-                native_frames.append(native_renderer.render(state))
-
-        # For the macro env, render at *low-level* granularity: hold the
-        # high-level skill choice fixed for macro_len steps but drive (and draw)
-        # the base env one physics step at a time, so the video is smooth instead
-        # of jumping macro_len steps per frame. The high-level policy re-decides
-        # at each macro boundary off the base obs there, exactly as SyncMacroMJX
-        # does internally.
-        base_step_fn = jax.jit(render_env.step) if is_macro else None
-        skill_actions_fn = jax.jit(self.env._skill_actions) if is_macro else None
-
-        print("\nTesting trained agents...")
-        for episode in range(10):
-            key = jax.random.PRNGKey(int(np.random.randint(0, 2**31)))
-            obs, state = reset_fn(key)
-            policy_fn.reset()
-            # Under staggered starts the macro state wraps the base EnvState; the
-            # low-level renderer drives the base env directly (stagger masking is
-            # not reflected in the video).
-            if is_macro:
-                state = self.env.base_state(state)
-            rewards, frames, native_frames = [], [], []
-
-            if is_macro:
-                done = False
-                for _ in range(self.env.max_steps):  # macro decisions
-                    skills = policy_fn(obs)
-                    for _ in range(self.env.macro_len):  # low-level steps
-                        _draw(state, obs)
-                        actions = skill_actions_fn(state, skills)
-                        obs, state, _, terminated, truncated, info = base_step_fn(
-                            state, actions
-                        )
-                        rewards.append(float(info["task_reward"]))
-                        if bool(terminated) or bool(truncated):
-                            done = True
-                            break
-                    if done:
-                        break
-            else:
-                for _ in range(self.env.max_steps):
-                    _draw(state, obs)
-                    obs, state, _, terminated, truncated, info = step_fn(
-                        state, policy_fn(obs)
-                    )
-                    # Team reward: the env's `reward` is per-agent under
-                    # difference_rewards, and the plot is of team performance.
-                    rewards.append(float(info["task_reward"]))
-                    if bool(terminated) or bool(truncated):
-                        break
-            rewards = np.asarray(rewards)
-
-            # Episode *return* (sum), not the final step's reward — the delivery
-            # bonuses are paid on the steps the boxes land, so `rewards[-1]`
-            # reported ~0 for any episode that did not happen to end on a
-            # delivery. Matches what `evaluate()` and the `reward` stat report.
-            print(
-                f"RETURN: {rewards.sum():.4f}  "
-                f"(final step {rewards[-1]:+.4f}, {len(rewards)} steps)"
-            )
-
-            fig, ax = plt.subplots(figsize=(10, 3))
-            ax.plot(np.arange(len(rewards)), rewards)
-            ax.set_ylabel("Reward")
-            ax.set_xlabel("Step")
-            ax.set_title(f"Episode {episode} — Reward")
-            plt.tight_layout()
-            fig_path = self.dirs["logs"] / f"reward_episode_{episode}.png"
-            plt.savefig(fig_path, dpi=150, bbox_inches="tight")
-            plt.close(fig)
-            print(f"Plot saved to {fig_path}")
-
-            video_path = self.dirs["logs"] / f"episode_{episode}.mp4"
-            imageio.mimwrite(video_path, frames, fps=30, macro_block_size=1)
-            print(f"Video saved to {video_path}")
-
-            if native_frames:
-                native_path = self.dirs["logs"] / f"episode_{episode}_native.mp4"
-                imageio.mimwrite(native_path, native_frames, fps=30, macro_block_size=1)
-                print(f"Native video saved to {native_path}")
+        raise NotImplementedError(
+            f"view() has no renderer for {type(self.env).__name__}"
+        )
 
     def _view_rover(self, n_episodes: int = 3):
         """Save arena and trained-policy trajectory PNGs in this trial's logs."""
@@ -673,60 +475,6 @@ class MAPPO_JAX_Runner:
             paths.append(path)
             print(f"{path} (return {float(traj.episode_return):.2f})")
         return paths
-
-    def _view_with_env_renderer(self, n_episodes: int = 3):
-        """Render episodes using the env's own renderer (SMAX -> SMAXVisualizer).
-
-        Fewer episodes than the MJX path renders (10) because SMAXVisualizer animates
-        through matplotlib, which costs ~2-4s per frame of episode: a battle that runs
-        the full `max_steps` takes several minutes on its own. Raise `n_episodes` if you
-        want more and are willing to wait.
-
-        Deterministic argmax under the legal-action mask, exactly as `eval_fn` does —
-        an unmasked argmax would render a policy the env never runs.
-        """
-        import matplotlib.pyplot as plt
-
-        train_state = self._load_train_state()
-        policy_fn = self._view_policy(train_state)
-        reset_fn = jax.jit(self.env.reset)
-        step_fn = jax.jit(self.env.step)
-        avail_fn = jax.jit(self.env.avail_actions)
-
-        for episode in range(n_episodes):
-            obs, state = reset_fn(jax.random.PRNGKey(self.rng_seed + episode))
-            policy_fn.reset()
-            # SMAXVisualizer replays the raw jaxmarl states, not the adapter's wrapper.
-            state_seq, rewards = [], []
-            for _ in range(self.env.max_steps):
-                mask = avail_fn(state)
-                actions = policy_fn(obs, mask)
-                state_seq.append(
-                    (
-                        state.key,
-                        state.env_state,
-                        self.env.to_action_dict(actions),
-                    )
-                )
-                obs, state, _, terminated, truncated, info = step_fn(state, actions)
-                rewards.append(float(info["task_reward"]))
-                if bool(terminated) or bool(truncated):
-                    break
-
-            gif_path = self.dirs["logs"] / f"episode_{episode}.gif"
-            self.env.render_episode(state_seq, gif_path)
-            print(
-                f"Episode {episode}: return={sum(rewards):.2f} "
-                f"steps={len(rewards)} -> {gif_path}"
-            )
-
-            fig, ax = plt.subplots()
-            ax.plot(rewards)
-            ax.set_xlabel("step")
-            ax.set_ylabel("team reward")
-            ax.set_title(f"Episode {episode} (return {sum(rewards):.2f})")
-            fig.savefig(self.dirs["logs"] / f"episode_{episode}_reward.png")
-            plt.close(fig)
 
     def evaluate(self):
         """Deterministic evaluation of the saved policy (PolicyEvaluator parity)."""

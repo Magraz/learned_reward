@@ -41,13 +41,13 @@ class CouplingDepletionReward(RewardModel):
         remaining = jnp.where(remaining < DEPLETION_TOL, 0.0, remaining)
 
         share = payout / jnp.maximum(observed, 1)  # (P,)
-        agent_rewards = in_radius.astype(payout.dtype) @ share  # (A,)
+        local_rewards = jnp.full((dist.shape[0]), payout.sum())
         return RewardOutput(
             reward=payout.sum(),
             pois=dataclasses.replace(pois, remaining=remaining),
             terminated=jnp.all(remaining <= 0.0),
             info={
-                "agent_rewards": agent_rewards,
+                "local_rewards": local_rewards,
                 "poi_observed": observed,
                 "poi_active": active,
                 "poi_payout": payout,
