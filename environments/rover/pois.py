@@ -1,4 +1,10 @@
-"""POI models. ``StaticPOIs`` is the fixed, config-defined layout."""
+"""POI models. ``StaticPOIs`` is the fixed, config-defined layout.
+
+Every POI carries a consumption ``order`` (its temporal coupling, next to the
+spatial ``coupling``): it can pay only once every POI of a lower order is used
+up. ``unlocked`` is the one definition of that rule; the reward and the
+scripted policies both read it.
+"""
 
 import warnings
 
@@ -8,7 +14,19 @@ import numpy as np
 from environments.rover.components import POIModel
 from environments.rover.state import POIState
 
-_ENTRY_KEYS = {"position", "coupling", "radius", "value", "rate"}
+_ENTRY_KEYS = {"position", "coupling", "radius", "value", "rate", "order"}
+
+
+def unlocked(pois):
+    """(..., P) bool: POIs whose temporal coupling is met, i.e. every POI of a
+    lower ``order`` is used up. Says nothing about a POI's own budget.
+
+    The lowest order among the POIs with budget left is always unlocked, so a
+    POI with budget left is always available somewhere.
+    """
+    pending = pois.remaining > 0  # (..., P)
+    earlier = pois.order[..., None, :] < pois.order[..., :, None]  # [p, q]: q before p
+    return ~jnp.any(earlier & pending[..., None, :], axis=-1)
 
 
 class StaticPOIs(POIModel):
@@ -17,7 +35,10 @@ class StaticPOIs(POIModel):
     Args:
         entries: one mapping per POI with ``position: [x, y]`` and ``coupling``
             (required) and optional ``radius`` / ``value`` / ``rate``, which
-            override the defaults below for that POI.
+            override the defaults below for that POI, and ``order`` (an
+            integer >= 0, default 0): the POI pays only once every POI of a
+            lower order is used up (see ``unlocked``). With every order equal,
+            as by default, POIs can be used in any order.
         radius: observation radius (inclusive) a rover must be within.
         value: total reward the POI can pay in one episode.
         rate: reward paid per step while its coupling is met; the POI is used
@@ -42,6 +63,9 @@ class StaticPOIs(POIModel):
             coupling = entry["coupling"]
             if int(coupling) != coupling or int(coupling) < 1:
                 raise ValueError(f"POI {k}: coupling must be an integer >= 1, got {coupling}")
+            order = entry.get("order", 0)
+            if int(order) != order or int(order) < 0:
+                raise ValueError(f"POI {k}: order must be an integer >= 0, got {order}")
             rows.append(
                 (
                     entry["position"],
@@ -49,9 +73,10 @@ class StaticPOIs(POIModel):
                     float(entry.get("radius", radius)),
                     float(entry.get("value", value)),
                     float(entry.get("rate", rate)),
+                    int(order),
                 )
             )
-        position, coupling, radius_, value_, rate_ = zip(*rows)
+        position, coupling, radius_, value_, rate_, order_ = zip(*rows)
         self.position = np.asarray(position, dtype=np.float32)
         if self.position.shape != (len(rows), 2):
             raise ValueError(f"every POI position must be [x, y], got {position}")
@@ -59,6 +84,7 @@ class StaticPOIs(POIModel):
         self.radius = np.asarray(radius_, dtype=np.float32)
         self.value = np.asarray(value_, dtype=np.float32)
         self.rate = np.asarray(rate_, dtype=np.float32)
+        self.order = np.asarray(order_, dtype=np.int32)
         for name in ("radius", "value", "rate"):
             arr = getattr(self, name)
             if np.any(arr <= 0):
@@ -72,6 +98,7 @@ class StaticPOIs(POIModel):
             value=jnp.asarray(self.value),
             rate=jnp.asarray(self.rate),
             remaining=jnp.asarray(self.value),
+            order=jnp.asarray(self.order),
         )
 
     def validate(self, env):
@@ -91,3 +118,12 @@ class StaticPOIs(POIModel):
                 f"({env.n_agents}); they can never pay.",
                 stacklevel=2,
             )
+            # A POI that never pays is never used up, so every POI ordered after
+            # it stays locked for the whole episode.
+            blocked = ~unreachable & (self.order > self.order[unreachable].min())
+            if np.any(blocked):
+                warnings.warn(
+                    f"POIs {np.flatnonzero(blocked).tolist()} are ordered after a POI "
+                    "that can never pay, so they never unlock either.",
+                    stacklevel=2,
+                )

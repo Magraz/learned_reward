@@ -1,0 +1,9 @@
+# @package _global_
+defaults:
+  - rover_4a_2poi_c2
+  - _self_
+env:
+  pois:
+    entries:
+      - {position: [2.0, 8.0], coupling: 2, order: 0}
+      - {position: [8.0, 2.0], coupling: 2, order: 1}

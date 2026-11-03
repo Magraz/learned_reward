@@ -630,10 +630,10 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   which evaluation, logging and rollouts score. `info` carries
   `task_reward`, `agent_positions`, `agent_headings`, `agent_speeds`,
   `poi_remaining`, plus the reward model's keys (`shared_reward`,
-  `difference_rewards`, `poi_observed`, `poi_active`, `poi_payout`). State
-  (`state.py`) is a flat
+  `difference_rewards`, `poi_observed`, `poi_unlocked`, `poi_active`,
+  `poi_payout`). State (`state.py`) is a flat
   pytree of arrays: `RoverEnvState(rovers=RoverState(position, heading),
-  pois=POIState(position, coupling, radius, value, rate, remaining), t)`.
+  pois=POIState(position, coupling, radius, value, rate, remaining, order), t)`.
 - **Dynamics** (`BaseRoverEnv.move`). Action `a = [turn, speed]` in `[-1, 1]²`:
   - `heading <- wrap(heading + a0 * max_turn)`, wrapped to [-π, π);
   - `speed = (a1 + 1)/2 * max_speed`, set directly each step (not integrated),
@@ -654,11 +654,13 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   - The agent block excludes self **by index**, so a co-located teammate is
     sensed.
   - Used-up POIs are not sensed but still count in the `n_pois` denominator.
+  - Locked POIs (see Temporal coupling) are sensed like unlocked ones: the
+    observation does not say which POIs can pay yet.
   - `sensor_radius: null` = the arena diagonal (global sensing).
   - Binning goes through `environments/sectors.py:sector_onehot`.
 - **Default reward** (`CouplingDepletionReward`), on post-move positions:
-  - a POI is active when ≥ `coupling` rovers are within its radius (inclusive)
-    and its `remaining` budget is > 0;
+  - a POI is active when ≥ `coupling` rovers are within its radius (inclusive),
+    its `remaining` budget is > 0, and it is unlocked (see Temporal coupling);
   - an active POI pays `min(rate, remaining)` per step and its budget drops by
     that much; extra rovers add nothing;
   - budgets below 1e-6 snap to 0, so value 1.0 / rate 0.05 depletes in exactly
@@ -683,9 +685,27 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
       still paid it); so does a rover waiting alone at a POI whose coupling is
       not met. The `D_i` need not sum to `G`.
     - It is per step: the counterfactual does not replay how the missing rover
-      would have changed later budgets;
+      would have changed later budgets. It keeps the locks too, so a rover at
+      a locked POI earns 0 and no rover is credited for unlocking later POIs;
   - `terminated` = every POI used up; `truncated = (t ≥ max_steps) &
     ~terminated`, so the two never fire together.
+- **Temporal coupling (POI `order`, added 2026-11-02).** Every POI has an
+  integer consumption `order` (`POIState.order`, int32), next to its spatial
+  `coupling`. It pays only once every POI of a lower order is used up; equal
+  orders constrain nothing, and gaps in the numbering do not matter.
+  - Set per entry in `pois.entries` (`order:`, integer ≥ 0, default 0), so
+    every existing variant (all 0) is unchanged. It is a key of the `static`
+    POI model, not a separate `type:`: the pytree state cannot hold `None`, so
+    every POI carries the field anyway. **No variant uses it yet.**
+  - `pois.unlocked(pois)` is the one definition of the rule, read by the
+    reward and by the scripted coalition policy. The lowest order with budget
+    left is always unlocked.
+  - The lock is read from the budgets at the start of the step: a POI unlocks
+    on the step after the last earlier POI's final payout.
+  - `StaticPOIs` warns when a POI is ordered after one that can never pay
+    (coupling > `n_agents`), since it never unlocks either.
+  - The figures add `order n` to each POI's label when a layout has more than
+    one order.
 - **Pluggable components** (`components.py`): `BaseRoverEnv(n_agents, pois,
   observation=None, reward=None, ...)` takes any
   - `POIModel`: `init(key, env)`; `step(pois, rovers, t)` (identity by default,
@@ -744,8 +764,9 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
 - **Demonstration policies** (`policies.py`, the scripted ones read the
   privileged state):
   - `random_policy`;
-  - `make_scripted_coalition_policy(env)`: rovers fill undepleted POIs in index
-    order, `coupling` rovers each, and retarget when a POI is used up;
+  - `make_scripted_coalition_policy(env)`: rovers fill available (undepleted
+    and unlocked) POIs in index order, `coupling` rovers each, and retarget
+    when a POI is used up;
   - `make_route_policy(env)` (2026-10-30): `params` is an `(A, K)` array of
     per-rover POI routes; a rover's target is the first POI on its route with
     budget left. It drives radially to the nearest point at 0.9 × radius
@@ -803,8 +824,13 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   (multi-agent particle environment) demo with random actions; it is not part
   of the rover domain and nothing imports it. It is the only remaining user of
   the `jaxmarl` package.
-- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (42 tests,
-  CPU). They cover shapes, jit and vmap; the sector frame and ±22.5° boundaries; exact
+- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (52 tests,
+  CPU). Temporal coupling: orders default to 0, `unlocked` with ties and gaps,
+  a later POI paying from the step after the earlier one is used up, a locked
+  POI paying no one (difference rewards included), the `G − G_{−i}` check
+  repeated with orders, the scripted team working ordered POIs in order (2
+  rovers; ignoring the lock scores 0), bad orders rejected, the never-unlocks
+  warning, and the figures' order labels. The rest cover shapes, jit and vmap; the sector frame and ±22.5° boundaries; exact
   presence values; co-located teammates; invisible used-up POIs; observations in
   [0, 1] over random rollouts of every variant; turn/speed mapping, heading
   wrap, wall clip; coupling and the inclusive radius; the shared reward;

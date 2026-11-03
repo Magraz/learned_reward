@@ -3,15 +3,13 @@
 # Only the coupling-4 POI needs the whole team; the rest can be worked in
 # parallel by sub-teams. Everything else is the default rover_2poi_c2.
 defaults:
-  - rover_2poi_c2
+  - rover_4a_2poi_c2
   - _self_
 
 env:
-  observation:
-      sensor_radius: 2.0
   pois:
     entries:
-      - {position: [1.5, 1.5], coupling: 1}
-      - {position: [8.5, 1.5], coupling: 2}
-      - {position: [8.5, 8.5], coupling: 3}
-      - {position: [1.5, 8.5], coupling: 4}
+      - {position: [1.5, 1.5], coupling: 1, order: 0}
+      - {position: [8.5, 1.5], coupling: 2, order: 1}
+      - {position: [8.5, 8.5], coupling: 3, order: 2}
+      - {position: [1.5, 8.5], coupling: 4, order: 3}

@@ -37,6 +37,9 @@ env:
     radius: 1.0                      # defaults for every entry below
     value: 1.0                       # total reward a POI can pay per episode
     rate: 0.05                       # paid per step while coupling is met
+    # An entry may also set `order` (integer >= 0, default 0), its temporal
+    # coupling: it pays only once every POI of a lower order is used up.
+    # Equal orders (the default) leave the POIs free to be used in any order.
     entries:
       - {position: [2.0, 8.0], coupling: 2}
       - {position: [8.0, 2.0], coupling: 2}

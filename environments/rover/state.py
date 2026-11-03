@@ -28,6 +28,9 @@ class POIState:
     value: jax.Array  # (P,) total reward the POI can pay in an episode
     rate: jax.Array  # (P,) reward paid per step while the coupling is met
     remaining: jax.Array  # (P,) budget left this episode; 0 = used up
+    # (P,) int32 consumption order (temporal coupling): a POI can pay only once
+    # every POI of a lower order is used up. Equal orders constrain nothing.
+    order: jax.Array
 
 
 @jax.tree_util.register_dataclass

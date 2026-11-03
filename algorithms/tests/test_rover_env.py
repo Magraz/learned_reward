@@ -38,6 +38,7 @@ from environments.rover.policies import (
     planned_rollouts,
     random_policy,
 )
+from environments.rover.pois import unlocked
 from environments.rover.rollout import rollout, rollout_reset
 from environments.rover.scripted_steps import solve_steps
 
@@ -265,9 +266,16 @@ def test_difference_rewards_pay_only_rovers_that_complete_a_coupling():
     np.testing.assert_allclose(info["difference_rewards"], [0.1, 0.05])
 
 
-def test_difference_rewards_match_the_team_reward_without_each_rover():
-    """D_i = G - G_{-i}, with G_{-i} from the reward model run on the other rovers."""
-    env = load_rover_env("rover_4poi_c1234")
+@pytest.mark.parametrize("orders", [None, (0, 1, 1, 2)])
+def test_difference_rewards_match_the_team_reward_without_each_rover(orders):
+    """D_i = G - G_{-i}, with G_{-i} from the reward model run on the other rovers.
+
+    With ``orders`` the random budgets also lock and unlock POIs.
+    """
+    cfg = load_env_config("rover_4poi_c1234")
+    for entry, order in zip(cfg["pois"]["entries"], orders or ()):
+        entry["order"] = order
+    env = make_rover_env(cfg)
     _, state = env.reset(jax.random.PRNGKey(0))
     @jax.jit
     def reward(rovers, pois):
@@ -357,6 +365,88 @@ def test_truncation_at_max_steps_is_exclusive_with_termination():
     env = make_env(max_steps=1)
     _, _, _, term, trunc, _ = env.step(state_at(env, [[5, 5], [5, 5]], remaining=[0.05]), stay(2))
     assert (bool(term), bool(trunc)) == (True, False)
+
+
+# -------------------------------------------------------- temporal coupling
+
+
+def test_orders_default_to_zero_and_leave_every_poi_unlocked():
+    env = load_rover_env("rover_4poi_c1234")
+    pois = env.pois.init(jax.random.PRNGKey(0), env)
+    np.testing.assert_array_equal(np.asarray(pois.order), [0, 0, 0, 0])
+    assert pois.order.dtype == jnp.int32
+    assert np.all(np.asarray(unlocked(pois)))
+
+
+def test_a_poi_unlocks_once_every_lower_order_is_used_up():
+    """Ties share a stage, gaps in the numbering do not matter, and only lower
+    orders lock a POI (its own budget does not)."""
+    env = make_env(entries=[{"position": [2.0, 2.0], "coupling": 1, "order": 0},
+                            {"position": [8.0, 2.0], "coupling": 1, "order": 2},
+                            {"position": [8.0, 8.0], "coupling": 1, "order": 2},
+                            {"position": [2.0, 8.0], "coupling": 1, "order": 5}])
+    pois = env.pois.init(jax.random.PRNGKey(0), env)
+    remaining = jnp.asarray([[1.0, 1.0, 1.0, 1.0],
+                             [0.0, 1.0, 1.0, 1.0],
+                             [0.0, 0.0, 1.0, 1.0],
+                             [0.0, 1.0, 0.0, 1.0],
+                             [0.0, 0.0, 0.0, 1.0],
+                             [1.0, 0.0, 0.0, 0.0]])
+    batched = jax.vmap(lambda r: unlocked(dataclasses.replace(pois, remaining=r)))(remaining)
+    np.testing.assert_array_equal(np.asarray(batched), [[True, False, False, False],
+                                                        [True, True, True, False],
+                                                        [True, True, True, False],
+                                                        [True, True, True, False],
+                                                        [True, True, True, True],
+                                                        [True, False, False, False]])
+
+
+def test_a_later_poi_pays_only_from_the_step_after_the_earlier_one_is_used_up():
+    env = make_env(entries=[{"position": [2.0, 5.0], "coupling": 1, "order": 0},
+                            {"position": [8.0, 5.0], "coupling": 1, "order": 1}])
+    state = state_at(env, [[2, 5], [8, 5]])  # each coupling met throughout
+    payouts, unlocks, terminated = [], [], []
+    for _ in range(45):
+        _, state, _, term, _, info = env.step(state, stay(2))
+        payouts.append(np.asarray(info["poi_payout"]))
+        unlocks.append(np.asarray(info["poi_unlocked"]))
+        terminated.append(bool(term))
+    payouts, unlocks = np.stack(payouts), np.stack(unlocks)
+    np.testing.assert_allclose(payouts[:20, 0], 0.05, rtol=1e-5)
+    assert np.all(payouts[:20, 1] == 0.0) and not unlocks[:20, 1].any()
+    # P0's last payout is at step 19; P1 is unlocked from step 20 on
+    assert unlocks[20:, 1].all() and np.all(payouts[20:, 0] == 0.0)
+    np.testing.assert_allclose(payouts[20:40, 1], 0.05, rtol=1e-5)
+    np.testing.assert_allclose(payouts.sum(), 2.0, atol=1e-5)
+    assert terminated.index(True) == 39
+
+
+def test_a_locked_poi_pays_no_one_even_with_its_coupling_met():
+    env = make_env(n_agents=3, entries=[{"position": [2.0, 5.0], "coupling": 1, "order": 0},
+                                        {"position": [8.0, 5.0], "coupling": 2, "order": 1}])
+    _, _, r, _, _, info = env.step(state_at(env, [[8, 5], [8.5, 5], [5, 5]]), stay(3))
+    np.testing.assert_array_equal(np.asarray(info["poi_active"]), [False, False])
+    assert float(info["task_reward"]) == 0.0
+    np.testing.assert_array_equal(r, [0.0, 0.0, 0.0])
+    np.testing.assert_array_equal(info["difference_rewards"], [0.0, 0.0, 0.0])
+    # once P0 is used up the same positions complete P1's coupling
+    _, _, _, _, _, info = env.step(
+        state_at(env, [[8, 5], [8.5, 5], [5, 5]], remaining=[0.0, 1.0]), stay(3)
+    )
+    np.testing.assert_allclose(info["difference_rewards"], [0.05, 0.05, 0.0])
+
+
+def test_the_scripted_team_works_ordered_pois_in_their_order():
+    """Two rovers, P1 ordered before P0: index order alone would park both at
+    the locked P0 forever."""
+    cfg = load_env_config("rover_2poi_c2", ["env.n_agents=2"])
+    cfg["pois"]["entries"][0]["order"] = 1
+    env = make_rover_env(cfg)
+    traj = rollout(env, make_scripted_coalition_policy(env), jax.random.PRNGKey(0))
+    np.testing.assert_allclose(traj.episode_return, 2.0, atol=1e-5)
+    remaining = np.asarray(traj.poi_remaining)
+    used_at = [int(np.argmax(remaining[:, k] <= 0)) for k in range(2)]
+    assert used_at[1] < used_at[0]
 
 
 # ------------------------------------------------------------ pluggability
@@ -462,6 +552,8 @@ def test_hydra_overrides_reach_the_env():
         (lambda c: c["pois"]["entries"][0].update(cupling=2), "unknown keys"),
         (lambda c: c["pois"]["entries"][0].update(position=[11.0, 5.0]), "outside"),
         (lambda c: c["pois"]["entries"][0].update(coupling=0), "coupling"),
+        (lambda c: c["pois"]["entries"][0].update(order=-1), "order"),
+        (lambda c: c["pois"]["entries"][0].update(order=1.5), "order"),
         (lambda c: c.update(spawn_region=[4.0, 12.0, 4.0, 6.0]), "spawn_region"),
     ],
 )
@@ -475,6 +567,14 @@ def test_bad_config_raises(edit, message):
 def test_a_poi_needing_more_rovers_than_exist_warns():
     with pytest.warns(UserWarning, match="can never pay"):
         make_env(n_agents=2, entries=[{"position": [5.0, 5.0], "coupling": 3}])
+
+
+def test_pois_ordered_after_one_that_can_never_pay_warn():
+    with pytest.warns(UserWarning, match="can never pay"), \
+            pytest.warns(UserWarning, match=r"POIs \[1\] are ordered after"):
+        make_env(n_agents=2, entries=[{"position": [5.0, 5.0], "coupling": 3, "order": 1},
+                                      {"position": [2.0, 2.0], "coupling": 1, "order": 2},
+                                      {"position": [8.0, 8.0], "coupling": 1, "order": 0}])
 
 
 # ----------------------------------------------------------------- rollouts
@@ -585,3 +685,25 @@ def test_every_variant_writes_arena_and_trajectory_images(tmp_path):
         trajectory = save_figure(plot_trajectory(env, traj, variant), tmp_path / f"{variant}_t.png")
         for path in (arena, trajectory):
             assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_figures_label_each_poi_order_only_in_an_ordered_layout():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from environments.rover.visualize import plot_arena, plot_trajectory
+
+    def labels(fig):
+        texts = [t.get_text() for ax in fig.axes for t in ax.texts]
+        ticks = [t.get_text() for ax in fig.axes for t in ax.get_yticklabels()]
+        return texts + ticks
+
+    cfg = load_env_config("rover_2poi_c2")
+    plain = make_rover_env(cfg)
+    assert not any("order" in s for s in labels(plot_arena(plain)))
+    cfg["pois"]["entries"][0]["order"] = 1
+    env = make_rover_env(cfg)
+    assert "P0 · order 1" in labels(plot_arena(env))
+    traj = rollout(env, make_scripted_coalition_policy(env), jax.random.PRNGKey(0))
+    found = labels(plot_trajectory(env, traj))
+    assert "P1 · c=2 · order 0" in found and "P0 (c=2, order 1)" in found

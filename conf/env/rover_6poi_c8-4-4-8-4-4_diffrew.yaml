@@ -1,8 +1,0 @@
-# @package _global_
-defaults:
-  - rover_6poi_c8-4-4-8-4-4
-  - _self_
-
-env:
-  reward:
-    mode: difference_rewards

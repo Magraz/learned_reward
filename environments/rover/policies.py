@@ -18,6 +18,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from environments.rover.base import wrap_angle
+from environments.rover.pois import unlocked
 from environments.rover.rollout import rollout, rollout_reset
 
 # Fraction of a POI's radius a route rover parks at, measured from the centre.
@@ -79,10 +80,12 @@ def _approach_point(centre, depth, pos):
 def make_scripted_coalition_policy(env):
     """A scripted team that forms coalitions to meet each POI's coupling.
 
-    Undepleted POIs are filled in index order: rovers 0..c0-1 go to the first
-    one, the next c1 rovers to the second, and so on; rovers left over join the
-    first undepleted POI. When a POI is used up the assignment is recomputed,
-    so a team too small to cover every POI at once covers them in sequence.
+    Available POIs (budget left and unlocked, see ``pois.unlocked``) are
+    filled in index order: rovers 0..c0-1 go to the first one, the next c1
+    rovers to the second, and so on; rovers left over join the first available
+    POI. When a POI is used up the assignment is recomputed, so a team too
+    small to cover every POI at once covers them in sequence, and POIs with a
+    consumption order are worked in that order.
     Each rover turns toward its target and drives at a speed that stops it on
     the target, slowing while it is still facing away.
     """
@@ -90,7 +93,7 @@ def make_scripted_coalition_policy(env):
     def policy(params, key, obs, state):
         pois = state.pois
         pos, heading = state.rovers.position, state.rovers.heading
-        available = pois.remaining > 0
+        available = (pois.remaining > 0) & unlocked(pois)
         need = jnp.where(available, pois.coupling, 0)
         cum = jnp.cumsum(need)  # (P,)
         rank = jnp.arange(pos.shape[0])

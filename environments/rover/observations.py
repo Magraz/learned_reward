@@ -26,6 +26,9 @@ class SectorDensityObservation(ObservationModel):
     rover itself by index, so a co-located teammate is still sensed. Used-up
     POIs (``remaining == 0``) are not sensed, but still count in the total, so
     the signal of the POIs that remain does not rescale as others deplete.
+    Locked POIs (a lower-order POI still has budget, see ``pois.unlocked``)
+    are sensed like unlocked ones: the observation does not say which POIs can
+    pay yet.
 
     Args:
         n_sectors: sectors per block; ``obs_dim = 2 * n_sectors``.

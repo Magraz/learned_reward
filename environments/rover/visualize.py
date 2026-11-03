@@ -2,7 +2,8 @@
 
 * ``plot_arena(env)`` — the arena and its POIs. A POI is drawn as its
   observation-radius disc with its coupling (rovers needed at once) written
-  inside, plus its value and per-step rate. Rover start positions are random,
+  inside, plus its value and per-step rate (and its consumption order, when
+  the layout has more than one). Rover start positions are random,
   so they are not drawn; one rover's sensing radius is overlaid at the
   spawn-region centre (``draw_sensing_radius``).
 * ``plot_trajectory(env, traj)`` — one episode: every rover's path (start dot,
@@ -68,6 +69,11 @@ def _style_axes(ax):
     ax.tick_params(colors=MUTED, labelsize=8, length=0)
 
 
+def _is_ordered(pois):
+    """True when the layout uses temporal coupling (more than one order)."""
+    return len(np.unique(np.asarray(pois.order))) > 1
+
+
 def draw_arena(ax, env, pois=None, depleted_at=None, coupling_inside=True):
     """Draw the arena and POIs on ``ax``.
 
@@ -75,11 +81,13 @@ def draw_arena(ax, env, pois=None, depleted_at=None, coupling_inside=True):
     maps a POI index to the step it was used up; such POIs are drawn hollow.
     ``coupling_inside`` writes the coupling large in the disc centre; set it
     False when paths will be drawn on top (they end on the centre), which moves
-    the coupling into the label above the disc.
+    the coupling into the label above the disc. A layout with more than one
+    consumption order adds each POI's order to that label.
     """
     if pois is None:
         pois = env.pois.init(jax.random.PRNGKey(0), env)
     depleted_at = depleted_at or {}
+    ordered = _is_ordered(pois)
     width, height = env.world_size
     _style_axes(ax)
     ax.set_aspect("equal")
@@ -116,6 +124,8 @@ def draw_arena(ax, env, pois=None, depleted_at=None, coupling_inside=True):
         else:
             ax.plot(x, y, "+", color=MUTED if used else INK_2, markersize=7, zorder=2)
             label = f"P{k} · c={coupling}"
+        if ordered:
+            label += f" · order {int(pois.order[k])}"
         ax.text(x, y + radius + 0.12, label, ha="center", va="bottom",
                 fontsize=8.5, color=INK_2, zorder=4)
         detail = (
@@ -196,13 +206,14 @@ def plot_arena(env, title=""):
         f"{width:g} x {height:g} arena · max return {total:g}",
         fontsize=10, color=INK, loc="left",
     )
-    fig.text(
-        0.02, 0.01,
+    note = (
         "Number = coupling (rovers needed inside the disc at once). "
         "Grey disc = POI observation radius.\n"
-        "Blue = one rover's sensing radius, drawn at the spawn-region centre.",
-        fontsize=7.5, color=MUTED,
+        "Blue = one rover's sensing radius, drawn at the spawn-region centre."
     )
+    if _is_ordered(pois):
+        note += "\nOrder n = the POI pays only once every POI of a lower order is used up."
+    fig.text(0.02, 0.01, note, fontsize=7.5, color=MUTED)
     return fig
 
 
@@ -280,7 +291,12 @@ def plot_trajectory(env, traj, title=""):
             ax_pay.text(0.01 * n_steps, row, "never paid", va="center",
                         fontsize=7.5, color=MUTED)
     ax_pay.set_yticks(range(n_pois))
-    ax_pay.set_yticklabels([f"P{k} (c={int(pois.coupling[k])})" for k in reversed(range(n_pois))])
+    ordered = _is_ordered(pois)
+    ax_pay.set_yticklabels([
+        f"P{k} (c={int(pois.coupling[k])}"
+        + (f", order {int(pois.order[k])})" if ordered else ")")
+        for k in reversed(range(n_pois))
+    ])
     ax_pay.set_xlim(0, n_steps)
     ax_pay.set_ylim(-0.7, n_pois - 0.3)
     ax_pay.grid(True, axis="x", color=GRID, linewidth=0.6)
