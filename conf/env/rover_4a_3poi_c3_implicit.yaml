@@ -1,0 +1,33 @@
+# @package _global_
+# Rover domain: a visiting order set by layout and values alone (no `order`
+# key). 4 rovers, 3 POIs of coupling 3, 15x15 arena. Collecting every POI's
+# value within the 100 steps is possible only by using the POIs up in the
+# order 0 -> 1 -> 2:
+#   P0, the corner behind the spawn, first;
+#   P1, the POI nearest the spawn, second (going there first is the trap);
+#   P2, the far corner, last.
+# Why: coupling 3 is more than half the team, so only one POI pays per step
+# and the team works them one at a time. Using everything up takes
+# 12 + 24 + 24 = 60 paying steps (value / rate), leaving 40 steps of travel.
+# Order 0-1-2 needs 33-38 of them (scripted route policy); every other order
+# needs at least 44, for any policy (bound checked on 1000 spawn seeds).
+# The values set that budget: a total of 57-62 paying steps keeps the order
+# unique; fewer lets other orders fit, more leaves 0-1-2 too little time.
+# Everything the argument depends on is pinned here, not inherited.
+defaults:
+  - rover_4a_2poi_c2
+  - _self_
+
+env:
+  n_agents: 4
+  max_steps: 100
+  world_size: [15.0, 15.0]
+  spawn_region: [3.42, 3.92, 4.35, 4.85]   # small, so every seed has the same best order
+  pois:
+    type: static
+    radius: 1.0
+    rate: 0.1
+    entries:
+      - {position: [1.0, 1.0], coupling: 3, value: 1.2}     # 12 steps, first
+      - {position: [7.75, 4.0], coupling: 3, value: 2.4}    # 24 steps, second (nearest)
+      - {position: [13.0, 13.0], coupling: 3, value: 2.4}   # 24 steps, last

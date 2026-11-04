@@ -9,7 +9,6 @@
 
 BATCH_NAMES=(
 "rover_2poi_c2" "rover_2poi_c8" "rover_4poi_c1234" "rover_6poi_c3_ring" "rover_6poi_c8-4-4-8-4-4"
-"rover_2poi_c2_diffrew" "rover_2poi_c8_diffrew" "rover_4poi_c1234_diffrew" "rover_6poi_c3_ring_diffrew" "rover_6poi_c8-4-4-8-4-4_diffrew"
 )
 
 EXPERIMENT_NAMES=(

@@ -3,6 +3,7 @@
 import jax.numpy as jnp
 
 from environments.rover.components import ObservationModel
+from environments.rover.pois import visible
 from environments.sectors import sector_onehot
 
 
@@ -27,8 +28,9 @@ class SectorDensityObservation(ObservationModel):
     POIs (``remaining == 0``) are not sensed, but still count in the total, so
     the signal of the POIs that remain does not rescale as others deplete.
     Locked POIs (a lower-order POI still has budget, see ``pois.unlocked``)
-    are sensed like unlocked ones: the observation does not say which POIs can
-    pay yet.
+    are sensed like unlocked ones, unless the POI sets ``hide_until_unlocked``:
+    then it is not sensed until it unlocks, and like a used-up POI it still
+    counts in the total. ``pois.visible`` is the rule.
 
     Args:
         n_sectors: sectors per block; ``obs_dim = 2 * n_sectors``.
@@ -78,7 +80,7 @@ class SectorDensityObservation(ObservationModel):
         pois = state.pois
         n_pois = pois.position.shape[0]
         rel_ap = pois.position[None, :, :] - pos[:, None, :]  # (A, P, 2)
-        available = jnp.broadcast_to(pois.remaining > 0, (n_agents, n_pois))
+        available = jnp.broadcast_to(visible(pois), (n_agents, n_pois))
         poi_block = self.presence(rel_ap, available, heading, R, n_pois)
 
         return jnp.concatenate([agents, poi_block], axis=1)

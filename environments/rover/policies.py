@@ -38,6 +38,9 @@ ROUTE_PLANS = {
         ((3, 5), 4),  # (10, 8)  -> (5, 3)
         ((3, 4), 4),  # (10, 8)  -> (15, 3)
     ),
+    # One team: only the order 0 -> 1 -> 2 uses every POI up within the
+    # episode (see the variant's yaml).
+    "rover_4a_3poi_c3_implicit012": (((0, 1, 2), 4),),
 }
 
 

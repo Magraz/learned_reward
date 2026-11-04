@@ -6,6 +6,7 @@ cuSolver / OOM errors into failures that read like assertion errors.
 
 import dataclasses
 import math
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -447,6 +448,83 @@ def test_the_scripted_team_works_ordered_pois_in_their_order():
     remaining = np.asarray(traj.poi_remaining)
     used_at = [int(np.argmax(remaining[:, k] <= 0)) for k in range(2)]
     assert used_at[1] < used_at[0]
+
+
+def test_hide_until_unlocked_defaults_off_and_an_entry_overrides_the_block_default():
+    entries = [{"position": [2.0, 5.0], "coupling": 1, "order": 0},
+               {"position": [8.0, 5.0], "coupling": 1, "order": 1, "hide_until_unlocked": True},
+               {"position": [5.0, 8.0], "coupling": 1, "order": 1}]
+    _, state = make_env(entries=entries).reset(jax.random.PRNGKey(0))
+    np.testing.assert_array_equal(state.pois.hide_until_unlocked, [False, True, False])
+    assert state.pois.hide_until_unlocked.dtype == jnp.bool_
+    entries[0]["hide_until_unlocked"] = entries[1]["hide_until_unlocked"] = False
+    pois = StaticPOIs(entries, hide_until_unlocked=True)
+    np.testing.assert_array_equal(pois.hide_until_unlocked, [False, False, True])
+
+
+def test_a_flagged_poi_is_hidden_until_it_unlocks():
+    """P0 behind the rover (sector 4), P1 ahead (sector 0) and ordered after P0."""
+    entries = [{"position": [3.0, 5.0], "coupling": 1, "order": 0},
+               {"position": [7.0, 5.0], "coupling": 1, "order": 1}]
+    plain = make_env(entries=entries)
+    entries[1]["hide_until_unlocked"] = True
+    env = make_env(entries=entries)
+    one = (1 - 2 / env.world_diagonal) / 2  # one POI at distance 2, of 2 POIs
+
+    locked = env.observe(state_at(env, [[5, 5], [1, 1]], remaining=[1.0, 1.0]))
+    np.testing.assert_allclose(locked[0, 8:], np.eye(8)[4] * one, rtol=1e-6)
+    unflagged = plain.observe(state_at(plain, [[5, 5], [1, 1]], remaining=[1.0, 1.0]))
+    np.testing.assert_allclose(unflagged[0, 8:], (np.eye(8)[0] + np.eye(8)[4]) * one, rtol=1e-6)
+    # Unlocked: sensed with the same presence as an unflagged POI (same normalizer).
+    unlocked_obs = env.observe(state_at(env, [[5, 5], [1, 1]], remaining=[0.0, 1.0]))
+    np.testing.assert_allclose(unlocked_obs[0, 8:], np.eye(8)[0] * one, rtol=1e-6)
+
+
+def test_a_flagged_poi_reads_as_used_up_while_locked_and_the_task_is_unchanged():
+    """A jitted episode of rover_4a_2poi_c2_ord with P1 flagged: while P0 has
+    budget the observation equals one where P1 is used up; once P0 is used up
+    it equals the unflagged env's. Trajectories and rewards are identical."""
+    cfg = load_env_config("rover_4a_2poi_c2_ord")
+    plain = make_rover_env(cfg)
+    cfg["pois"]["entries"][1]["hide_until_unlocked"] = True
+    env = make_rover_env(cfg)
+    key = jax.random.PRNGKey(0)
+    traj = jax.jit(lambda k: rollout(env, make_scripted_coalition_policy(env), k))(key)
+    plain_traj = jax.jit(lambda k: rollout(plain, make_scripted_coalition_policy(plain), k))(key)
+    np.testing.assert_array_equal(traj.positions, plain_traj.positions)
+    np.testing.assert_array_equal(traj.rewards, plain_traj.rewards)
+
+    def observe(env, remaining):
+        pois = env.reset(key)[1].pois
+        return jax.vmap(lambda p, h, r: env.observe(RoverEnvState(
+            RoverState(p, h), dataclasses.replace(pois, remaining=r), jnp.zeros((), jnp.int32)
+        )))(traj.positions, traj.headings, remaining)
+
+    remaining = traj.poi_remaining
+    obs = np.asarray(observe(env, remaining))
+    as_used_up = np.asarray(observe(env, remaining.at[:, 1].set(0.0)))
+    unflagged = np.asarray(observe(plain, remaining))
+    locked = np.asarray(remaining[:, 0] > 0)
+    after = ~locked & np.asarray(remaining[:, 1] > 0)
+    assert locked.any() and after.any()  # the episode reaches both phases
+    np.testing.assert_array_equal(obs[locked], as_used_up[locked])
+    np.testing.assert_array_equal(obs[after], unflagged[after])
+    assert not np.array_equal(obs[locked], unflagged[locked])
+
+
+def test_hide_until_unlocked_must_be_a_bool_and_warns_where_it_never_acts():
+    with pytest.raises(ValueError, match="hide_until_unlocked must be true or false"):
+        make_env(entries=[{"position": [5.0, 5.0], "coupling": 1, "hide_until_unlocked": 1}])
+    entries = [{"position": [2.0, 5.0], "coupling": 1, "order": 0},
+               {"position": [8.0, 5.0], "coupling": 1, "order": 1}]
+    with pytest.warns(UserWarning, match=r"POIs \[0\], but none of them"):
+        make_env(entries=[{**entries[0], "hide_until_unlocked": True}, entries[1]])
+    with pytest.warns(UserWarning, match=r"POIs \[0, 1\], but none of them"):
+        StaticPOIs([{**e, "order": 0} for e in entries], hide_until_unlocked=True)
+    # Flagging every POI of an ordered layout acts on P1, so it is no mistake.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        StaticPOIs(entries, hide_until_unlocked=True)
 
 
 # ------------------------------------------------------------ pluggability

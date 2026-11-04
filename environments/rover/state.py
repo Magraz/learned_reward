@@ -31,6 +31,9 @@ class POIState:
     # (P,) int32 consumption order (temporal coupling): a POI can pay only once
     # every POI of a lower order is used up. Equal orders constrain nothing.
     order: jax.Array
+    # (P,) bool: the POI is hidden from the rovers' observations while it is
+    # locked by its order (see ``pois.visible``).
+    hide_until_unlocked: jax.Array
 
 
 @jax.tree_util.register_dataclass

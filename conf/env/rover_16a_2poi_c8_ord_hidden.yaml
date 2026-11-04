@@ -1,0 +1,11 @@
+# @package _global_
+# rover_16a_2poi_c8_ord with every locked POI hidden from the rovers: a POI is sensed only
+# once every POI of a lower order is used up (hide_until_unlocked). The task
+# and the reward are rover_16a_2poi_c8_ord's; only the observation differs.
+defaults:
+  - rover_16a_2poi_c8_ord
+  - _self_
+
+env:
+  pois:
+    hide_until_unlocked: true

@@ -65,6 +65,28 @@ renders; `mappo_jax` with `model=mlp` trains and renders.
 
 ### Loose ends (not fixed)
 
+- **Env groups renamed without their callers (commit `2fa6f43`, 2026-11-02).**
+  `rover_2poi_c2` → `rover_4a_2poi_c2`, `rover_2poi_c8` → `rover_16a_2poi_c8`,
+  `rover_4poi_c1234` → `rover_4a_4poi_c1234`, `rover_6poi_c3_ring` →
+  `rover_6a_6poi_c3`, `rover_6poi_c8-4-4-8-4-4` → `rover_16a_6poi_c844844`; the
+  `_diffrew` groups were deleted. Still on the old names: `conf/config.yaml`'s
+  default env (so a bare `uv run python train.py` fails), the tests (30 fail
+  with `Could not find 'env/rover_2poi_c2'` and the like, found 2026-11-03),
+  `ROUTE_PLANS` and `scripted_steps.py`, docstrings, the launch lists in
+  `train_batches.sh` and `scripts/hpc/experiment_batch*.sh`, and the variant
+  names in this file. The base group's `rate` is now 0.1 (was 0.05), so tests
+  timing a variant's depletion need new numbers once they run again.
+  Renamed again on 2026-11-03 (uncommitted): `_ord<levels>` → `_ord` (e.g.
+  `rover_4a_2poi_c2_ord01` → `rover_4a_2poi_c2_ord`) and `_implicit012` →
+  `_implicit`; `ROUTE_PLANS` still names `rover_4a_3poi_c3_implicit012`.
+- **`_ord` comments copied from the unordered groups** (found 2026-11-03):
+  `rover_4a_4poi_c1234_ord` says the POIs "can be worked in parallel by
+  sub-teams" and `rover_6a_6poi_c3_ord` that "two POIs can be worked at
+  once", but their strict orders (0-1-2-3, 0-…-5) let only one POI pay at a
+  time. `rover_4a_4poi_c1234_ord` also senses globally where
+  `rover_4a_4poi_c1234` has `sensor_radius: 2.0`, so that pair differs in
+  sensing as well as in order.
+
 - `conf/model/mlp.yaml` is missing again (found 2026-10-30, after the restore
   above; never committed), so `algorithm=mappo_jax model=mlp` fails with
   `Could not find 'model/mlp'`. Its content was `# @package _global_` and
@@ -633,7 +655,8 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   `difference_rewards`, `poi_observed`, `poi_unlocked`, `poi_active`,
   `poi_payout`). State (`state.py`) is a flat
   pytree of arrays: `RoverEnvState(rovers=RoverState(position, heading),
-  pois=POIState(position, coupling, radius, value, rate, remaining, order), t)`.
+  pois=POIState(position, coupling, radius, value, rate, remaining, order,
+  hide_until_unlocked), t)`.
 - **Dynamics** (`BaseRoverEnv.move`). Action `a = [turn, speed]` in `[-1, 1]²`:
   - `heading <- wrap(heading + a0 * max_turn)`, wrapped to [-π, π);
   - `speed = (a1 + 1)/2 * max_speed`, set directly each step (not integrated),
@@ -654,8 +677,10 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   - The agent block excludes self **by index**, so a co-located teammate is
     sensed.
   - Used-up POIs are not sensed but still count in the `n_pois` denominator.
-  - Locked POIs (see Temporal coupling) are sensed like unlocked ones: the
-    observation does not say which POIs can pay yet.
+  - Locked POIs (see Temporal coupling) are sensed like unlocked ones, so the
+    observation does not say which POIs can pay yet, unless the POI sets
+    `hide_until_unlocked` (see Temporal coupling). The rule is
+    `pois.visible(pois)`.
   - `sensor_radius: null` = the arena diagonal (global sensing).
   - Binning goes through `environments/sectors.py:sector_onehot`.
 - **Default reward** (`CouplingDepletionReward`), on post-move positions:
@@ -696,7 +721,7 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   - Set per entry in `pois.entries` (`order:`, integer ≥ 0, default 0), so
     every existing variant (all 0) is unchanged. It is a key of the `static`
     POI model, not a separate `type:`: the pytree state cannot hold `None`, so
-    every POI carries the field anyway. **No variant uses it yet.**
+    every POI carries the field anyway. The `_ord` groups use it.
   - `pois.unlocked(pois)` is the one definition of the rule, read by the
     reward and by the scripted coalition policy. The lowest order with budget
     left is always unlocked.
@@ -704,6 +729,49 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
     on the step after the last earlier POI's final payout.
   - `StaticPOIs` warns when a POI is ordered after one that can never pay
     (coupling > `n_agents`), since it never unlocks either.
+  - **Hiding locked POIs (`hide_until_unlocked`, added 2026-11-03).** A POI
+    with `hide_until_unlocked: true` is not sensed by the rovers while it is
+    locked. It appears on the step it unlocks.
+    - What changes: the observation only, through `pois.visible(pois)`:
+      `remaining > 0 & (~hide_until_unlocked | unlocked)`. The reward and the
+      lock are unchanged: a flagged POI pays exactly when an unflagged one
+      would.
+    - The rover critic reads the concatenated observations, so it does not
+      see a hidden POI either.
+    - A hidden POI still counts in the `n_pois` normalizer, as a used-up one
+      does: while locked it reads exactly as used up, and once unlocked
+      exactly as an unflagged POI.
+    - Set per entry in `pois.entries`, or as a `pois:` block default (like
+      `radius` / `value` / `rate`) that an entry overrides; the base group
+      sets `hide_until_unlocked: false`. One line hides every locked POI of
+      a variant: `pois: {hide_until_unlocked: true}`, or on the command line
+      `env.pois.hide_until_unlocked=true`.
+    - A POI of the lowest order is never locked, so its flag does nothing.
+      `StaticPOIs` warns when the flag is set but acts on no POI (e.g. on a
+      layout with a single order), and raises on a non-boolean value.
+    - It is not in the results path, so a command-line override trains into
+      the unflagged group's directory: give a flagged layout its own env group.
+    - **`<name>_ord_hidden` groups (2026-11-03)**, one per `_ord` group:
+      `rover_4a_2poi_c2_ord_hidden`, `rover_4a_4poi_c1234_ord_hidden`,
+      `rover_6a_6poi_c3_ord_hidden`, `rover_16a_2poi_c8_ord_hidden`,
+      `rover_16a_6poi_c844844_ord_hidden`. Each inherits its `_ord` group and
+      sets only `pois.hide_until_unlocked: true`; each composes to exactly its
+      parent's config plus that key, builds without warnings, and hides at
+      reset every POI above the lowest order.
+    - ⚠ **Where hiding acts.** Over 8 scripted-team episodes per group, the
+      observation differed from the parent's on 129 steps
+      (`rover_4a_2poi_c2_ord_hidden`, global sensing) and 494
+      (`rover_4a_4poi_c1234_ord_hidden`, global sensing), and on **none** in
+      `rover_16a_2poi_c8`, `rover_6a_6poi_c3` and `rover_16a_6poi_c844844`
+      (`_ord_hidden`). Their sensor radius (2.0, 2.0, 4.0) already keeps a
+      locked POI out of range: it is farther than that from the spawn box
+      and from the POI being worked. There, hiding only acts when a rover
+      strays within range of a locked POI, so an `_ord` vs `_ord_hidden`
+      comparison on those layouts measures little.
+    - Smoke-verified 2026-11-03: `rmappo_jax` trains (2 updates, CPU) and
+      evaluates on `rover_4a_2poi_c2_ord01` (now `rover_4a_2poi_c2_ord`) with
+      the flag on. Every variant builds with the flag off and on, observations
+      stay in [0, 1], and POIs are hidden only in the 5 `_ord` variants.
   - The figures add `order n` to each POI's label when a layout has more than
     one order.
 - **Pluggable components** (`components.py`): `BaseRoverEnv(n_agents, pois,
@@ -737,6 +805,31 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   | `rover_4poi_c1234` | 4 | 10×10 | 2.0 | 4 corners: 1, 2, 3, 4 |
   | `rover_6poi_c3_ring` | 6 | 10×10 | 2.0 | 6 of coupling 3 on a radius-3.5 ring |
   | `rover_6poi_c8-4-4-8-4-4` | 16 | 20×20, spawn `[8,12]²` | 4.0 | (10,12) 8, (15,17) 4, (5,17) 4, (10,8) 8, (15,3) 4, (5,3) 4 |
+  | `rover_4a_3poi_c3_implicit012` | 4 | 15×15, spawn `[3.42,3.92]×[4.35,4.85]` | global | (1,1) 3, (7.75,4) 3, (13,13) 3 |
+
+  **`rover_4a_3poi_c3_implicit012`** (2026-11-03): a visiting order set by
+  layout and values, with no `order` key. Only the depletion order 0 → 1 → 2
+  (the corner behind the spawn, then the POI nearest the spawn, then the far
+  corner) collects the maximum 6.0 within 100 steps. Heading for the nearest
+  POI first is the trap.
+  - Why: coupling 3 is more than half of the 4 rovers, so only one POI pays per
+    step. The paying steps, `Σ value / rate` = 12 + 24 + 24 = 60 (values 1.2,
+    2.4, 2.4 at rate 0.1), are the same in every order; only travel differs,
+    and 40 steps are left for it. With one team and static POIs the values can
+    only set this budget; the order itself is a shortest-path question. The
+    nearest POI can come second but never uniquely last (starting there and
+    reversing the path is never longer).
+  - Checked over 1000 spawn seeds: the scripted route 0-1-2 (`ROUTE_PLANS`
+    has it; `scripted_steps --variant rover_4a_3poi_c3_implicit012`) collects
+    6.0 on every seed, in 93-98 steps, with 33-38 non-paying steps. A lower
+    bound for any policy (heading-limited entry, then straight-line travel
+    between disc edges, over every walk that uses the POIs up in that order)
+    puts every other order at ≥ 44 non-paying steps. The scripted routes of the
+    wrong orders collect 61-89% of the maximum (nearest-first 88.7%). The
+    total paying steps must stay within 57-62 for the order to stay unique.
+    The check script is not in the repository.
+  - The same shape in 10×10 leaves wrong orders 77-92% of the maximum and
+    0-3 spare steps; in 20×20, 59-78% but a much harder first coupling.
 
   `rover_2poi_c8_diffrew` (2026-10-30) is `rover_2poi_c8` with
   `reward.mode: difference_rewards`, its own results path. Smoke-verified
@@ -824,8 +917,13 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   (multi-agent particle environment) demo with random actions; it is not part
   of the rover domain and nothing imports it. It is the only remaining user of
   the `jaxmarl` package.
-- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (52 tests,
-  CPU). Temporal coupling: orders default to 0, `unlocked` with ties and gaps,
+- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (56 tests,
+  CPU; 27 fail on stale variant names, see Loose ends). Hiding: the flag's
+  default and per-entry override; a flagged POI absent until it unlocks, then
+  sensed exactly as an unflagged one; over a jitted episode of
+  `rover_4a_2poi_c2_ord`, a flagged POI reads as used up while locked and
+  trajectories and rewards are unchanged; a non-boolean value rejected; the
+  no-effect warning. Temporal coupling: orders default to 0, `unlocked` with ties and gaps,
   a later POI paying from the step after the earlier one is used up, a locked
   POI paying no one (difference rewards included), the `G − G_{−i}` check
   repeated with orders, the scripted team working ordered POIs in order (2
