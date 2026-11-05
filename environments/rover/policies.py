@@ -9,7 +9,7 @@ learned policy must not:
 * ``make_route_policy``: each rover follows its own planned sequence of POIs
   (its route), passed as ``params``. ``plan_routes`` assigns rovers to the
   routes of a plan from the initial state, and ``planned_rollouts`` runs it.
-  ``ROUTE_PLANS`` holds the hand-written plan of each variant that has one.
+  ``ROUTE_PLANS`` holds a hand-written plan for each rover env group.
 """
 
 import jax
@@ -26,22 +26,61 @@ from environments.rover.rollout import rollout, rollout_reset
 # leg starts nearly at the boundary.
 PARK_DEPTH = 0.9
 
-# Team plans per variant: ``(route, n_rovers)`` pairs, a route being POI indices
-# in visiting order. ``rover_6poi_c8-4-4-8-4-4``: the couplings sum to 32 = 2 x 16
-# rovers, so the team works in two waves. First the two coupling-8 POIs next to
-# the spawn box (8 rovers each), then the four coupling-4 corners (4 each), each
-# corner team reached from the nearer centre POI.
+# Team plans per rover env group (conf/env/<name>.yaml): ``(route, n_rovers)``
+# pairs, a route being POI indices in visiting order. A rover waits at a locked
+# POI (see ``pois.unlocked``) until it unlocks. Each plan was the best of the
+# candidates tried on 2026-11-04 (whole-team sequences, splits and orders); it
+# is not proven optimal. Steps to solve are ``scripted_steps`` medians.
+_TWO_PAIRS = (((0,), 2), ((1,), 2))
+_TWO_EIGHTS = (((0,), 8), ((1,), 8))
+# Couplings sum to 32 = 2 x 16 rovers, so two waves: 8 rovers on each centre POI
+# next to the spawn box, then 4 per corner, each corner team leaving from the
+# nearer centre POI.
+_C844844 = (
+    ((0, 2), 4),  # (10, 12) -> (5, 17)
+    ((0, 1), 4),  # (10, 12) -> (15, 17)
+    ((3, 5), 4),  # (10, 8)  -> (5, 3)
+    ((3, 4), 4),  # (10, 8)  -> (15, 3)
+)
 ROUTE_PLANS = {
-    "rover_6poi_c8-4-4-8-4-4": (
-        ((0, 2), 4),  # (10, 12) -> (5, 17)
-        ((0, 1), 4),  # (10, 12) -> (15, 17)
-        ((3, 5), 4),  # (10, 8)  -> (5, 3)
-        ((3, 4), 4),  # (10, 8)  -> (15, 3)
-    ),
-    # One team: only the order 0 -> 1 -> 2 uses every POI up within the
-    # episode (see the variant's yaml).
-    "rover_4a_3poi_c3_implicit012": (((0, 1, 2), 4),),
+    # One pair (or eight) per POI. Ordered, the second team parks at the locked
+    # POI and starts the step after the first is used up.
+    "rover_4a_2poi_c2": _TWO_PAIRS,
+    "rover_4a_2poi_c2_ord": _TWO_PAIRS,
+    "rover_4a_2poi_c2_implicit": _TWO_PAIRS,  # 30 and 60 coupled steps, in parallel
+    "rover_16a_2poi_c8": _TWO_EIGHTS,
+    "rover_16a_2poi_c8_ord": _TWO_EIGHTS,
+    # One team (the coupling is more than half the rovers): only the order
+    # 0 -> 1 -> 2 uses every POI up within the episode (see the group's yaml).
+    "rover_2a_3poi_c2_implicit": (((0, 1, 2), 2),),
+    "rover_4a_3poi_c3_implicit": (((0, 1, 2), 4),),
+    # The coupling-4 corner needs every rover, so it goes first. Then three
+    # rovers take the coupling-3 corner and one the coupling-1 corner, both next
+    # to it; then two of the three take the coupling-2 corner, next to both.
+    "rover_4a_4poi_c1234": (((3, 2, 1), 2), ((3, 2), 1), ((3, 0), 1)),
+    # Strict order 0-1-2-3, one POI at a time. One rover works POI 0, then waits
+    # at 3; a pair waits at 1, then joins the rover waiting at 2; those three
+    # then join it at 3.
+    "rover_4a_4poi_c1234_ord": (((0, 3), 1), ((1, 2, 3), 2), ((2, 3), 1)),
+    # Two teams of 3, each working three neighbouring POIs of the ring.
+    "rover_6a_6poi_c3": (((0, 1, 2), 3), ((3, 4, 5), 3)),
+    # Strict order 0-...-5: the teams alternate, each driving to its next POI
+    # (two along the ring) while the other team works the one in between.
+    "rover_6a_6poi_c3_ord": (((0, 2, 4), 3), ((1, 3, 5), 3)),
+    # Under `_ord` the left corners (order 2) wait for the right ones (order 1).
+    "rover_16a_6poi_c844844": _C844844,
+    "rover_16a_6poi_c844844_ord": _C844844,
+    # Cannot collect the maximum 10: the POIs need 100, 150 and 60 coupled
+    # steps, and two teams of 3 supply at most 200 in 100 steps. One team takes
+    # POI 2 (0.1 per step), then POI 0; the other works POI 1 (0.02 per step)
+    # for the whole episode.
+    "rover_6a_3poi_c3_implicit": (((2, 0), 3), ((1,), 3)),
 }
+# Hiding changes only what the rovers sense, and these rovers read the true
+# state, so each `_ord_hidden` group uses its `_ord` group's plan.
+ROUTE_PLANS.update(
+    {f"{name}_hidden": plan for name, plan in list(ROUTE_PLANS.items()) if name.endswith("_ord")}
+)
 
 
 def random_policy(params, key, obs, state):

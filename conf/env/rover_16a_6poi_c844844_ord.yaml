@@ -6,8 +6,6 @@ env:
   n_agents: 16
   world_size: [20.0, 20.0]           # arena width, height
   spawn_region: [8.0, 12.0, 8.0, 12.0] # x_min, x_max, y_min, y_max (uniform)
-  observation:
-    sensor_radius: 4.0        # was the arena diagonal: every rover saw everything
   pois:
     entries:
       - {position: [10.0, 12.0], coupling: 8, order: 0}

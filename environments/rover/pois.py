@@ -3,9 +3,10 @@
 Every POI carries a consumption ``order`` (its temporal coupling, next to the
 spatial ``coupling``): it can pay only once every POI of a lower order is used
 up. ``unlocked`` is the one definition of that rule; the reward and the
-scripted policies both read it. A POI flagged ``hide_until_unlocked`` is also
-hidden from the rovers while it is locked; ``visible`` is the one definition of
-what the rovers can sense.
+scripted policies both read it. Every POI, used up or not, is sensed by the
+rovers, except a POI flagged ``hide_until_unlocked`` while it is locked and a
+POI flagged ``hide_when_used_up`` once it is used up; ``visible`` is the one
+definition of what the rovers can sense.
 """
 
 import warnings
@@ -24,6 +25,7 @@ _ENTRY_KEYS = {
     "rate",
     "order",
     "hide_until_unlocked",
+    "hide_when_used_up",
 }
 
 
@@ -40,10 +42,25 @@ def unlocked(pois):
 
 
 def visible(pois):
-    """(..., P) bool: POIs the rovers can sense. A used-up POI never is, and a
-    POI flagged ``hide_until_unlocked`` is not while it is locked (``unlocked``).
+    """(..., P) bool: POIs the rovers can sense. Every POI is, used up or not,
+    except a POI flagged ``hide_until_unlocked`` while it is locked
+    (``unlocked``) and a POI flagged ``hide_when_used_up`` once it is used up.
+
+    A used-up POI is always unlocked (it could only pay once unlocked), so
+    ``hide_until_unlocked`` never hides it.
     """
-    return (pois.remaining > 0) & (~pois.hide_until_unlocked | unlocked(pois))
+    used_up = pois.remaining <= 0
+    return (~used_up | ~pois.hide_when_used_up) & (
+        ~pois.hide_until_unlocked | unlocked(pois)
+    )
+
+
+def _flag(entry, name, default, k):
+    """An entry's true/false key, falling back to the block default."""
+    value = entry.get(name, default)
+    if not isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"POI {k}: {name} must be true or false, got {value!r}")
+    return bool(value)
 
 
 class StaticPOIs(POIModel):
@@ -56,7 +73,8 @@ class StaticPOIs(POIModel):
             integer >= 0, default 0): the POI pays only once every POI of a
             lower order is used up (see ``unlocked``). With every order equal,
             as by default, POIs can be used in any order. An entry may also set
-            ``hide_until_unlocked`` (overriding the default below).
+            ``hide_until_unlocked`` and ``hide_when_used_up`` (overriding the
+            defaults below).
         radius: observation radius (inclusive) a rover must be within.
         value: total reward the POI can pay in one episode.
         rate: reward paid per step while its coupling is met; the POI is used
@@ -65,9 +83,21 @@ class StaticPOIs(POIModel):
             rovers while it is locked, i.e. while a POI of a lower ``order``
             still has budget (see ``visible``). A POI of the lowest order is
             never locked, so the flag only acts on a POI with a higher order.
+        hide_when_used_up: true or false. A flagged POI is not sensed once it
+            is used up. Off by default: a used-up POI is sensed exactly like a
+            live one. True is the rule every run before 2026-11-04 trained
+            under.
     """
 
-    def __init__(self, entries, radius=1.0, value=1.0, rate=0.05, hide_until_unlocked=False):
+    def __init__(
+        self,
+        entries,
+        radius=1.0,
+        value=1.0,
+        rate=0.05,
+        hide_until_unlocked=False,
+        hide_when_used_up=False,
+    ):
         entries = [dict(e) for e in entries]
         if not entries:
             raise ValueError("StaticPOIs needs at least one POI entry")
@@ -90,11 +120,6 @@ class StaticPOIs(POIModel):
             order = entry.get("order", 0)
             if int(order) != order or int(order) < 0:
                 raise ValueError(f"POI {k}: order must be an integer >= 0, got {order}")
-            hide = entry.get("hide_until_unlocked", hide_until_unlocked)
-            if not isinstance(hide, (bool, np.bool_)):
-                raise ValueError(
-                    f"POI {k}: hide_until_unlocked must be true or false, got {hide!r}"
-                )
             rows.append(
                 (
                     entry["position"],
@@ -103,10 +128,11 @@ class StaticPOIs(POIModel):
                     float(entry.get("value", value)),
                     float(entry.get("rate", rate)),
                     int(order),
-                    bool(hide),
+                    _flag(entry, "hide_until_unlocked", hide_until_unlocked, k),
+                    _flag(entry, "hide_when_used_up", hide_when_used_up, k),
                 )
             )
-        position, coupling, radius_, value_, rate_, order_, hide_ = zip(*rows)
+        position, coupling, radius_, value_, rate_, order_, hide_, hide_used_ = zip(*rows)
         self.position = np.asarray(position, dtype=np.float32)
         if self.position.shape != (len(rows), 2):
             raise ValueError(f"every POI position must be [x, y], got {position}")
@@ -116,6 +142,7 @@ class StaticPOIs(POIModel):
         self.rate = np.asarray(rate_, dtype=np.float32)
         self.order = np.asarray(order_, dtype=np.int32)
         self.hide_until_unlocked = np.asarray(hide_, dtype=bool)
+        self.hide_when_used_up = np.asarray(hide_used_, dtype=bool)
         for name in ("radius", "value", "rate"):
             arr = getattr(self, name)
             if np.any(arr <= 0):
@@ -142,6 +169,7 @@ class StaticPOIs(POIModel):
             remaining=jnp.asarray(self.value),
             order=jnp.asarray(self.order),
             hide_until_unlocked=jnp.asarray(self.hide_until_unlocked),
+            hide_when_used_up=jnp.asarray(self.hide_when_used_up),
         )
 
     def validate(self, env):

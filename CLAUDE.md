@@ -72,13 +72,14 @@ renders; `mappo_jax` with `model=mlp` trains and renders.
   `_diffrew` groups were deleted. Still on the old names: `conf/config.yaml`'s
   default env (so a bare `uv run python train.py` fails), the tests (30 fail
   with `Could not find 'env/rover_2poi_c2'` and the like, found 2026-11-03),
-  `ROUTE_PLANS` and `scripted_steps.py`, docstrings, the launch lists in
+  docstrings, the launch lists in
   `train_batches.sh` and `scripts/hpc/experiment_batch*.sh`, and the variant
   names in this file. The base group's `rate` is now 0.1 (was 0.05), so tests
   timing a variant's depletion need new numbers once they run again.
   Renamed again on 2026-11-03 (uncommitted): `_ord<levels>` → `_ord` (e.g.
   `rover_4a_2poi_c2_ord01` → `rover_4a_2poi_c2_ord`) and `_implicit012` →
-  `_implicit`; `ROUTE_PLANS` still names `rover_4a_3poi_c3_implicit012`.
+  `_implicit`. `ROUTE_PLANS`, `scripted_steps.py` and the route tests were
+  moved to the current names on 2026-11-04.
 - **`_ord` comments copied from the unordered groups** (found 2026-11-03):
   `rover_4a_4poi_c1234_ord` says the POIs "can be worked in parallel by
   sub-teams" and `rover_6a_6poi_c3_ord` that "two POIs can be worked at
@@ -166,7 +167,8 @@ or `evaluate()`.
     `mappo.yaml` / `mappo_vanilla.yaml`, see Loose ends);
   - `conf/env/rover_*.yaml` (5 variants, see the rover section);
   - `conf/model/mlp.yaml` (`mappo_jax`), `conf/model/{rmappo,mappo_mlp}.yaml`
-    (`rmappo_jax`). Each stack rejects the other's groups with a `TypeError`
+    and their `_diffrew` twins (`rmappo_jax`; the twins also set
+    `env.reward.mode: difference_rewards`). Each stack rejects the other's groups with a `TypeError`
     before any results directory is created;
   - `conf/seeds/standard.yaml`;
   - `conf/hydra/launcher/joblib_auto.yaml`.
@@ -628,7 +630,19 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   - ⚠ The mode is not in the results path
     (`<env group>/<model group>/<trial>`). `env.reward.mode=...` on the command
     line trains into the shared-reward runs' directories, and with
-    `checkpoint=true` it resumes them. Give each mode its own env group.
+    `checkpoint=true` it resumes them. Give each mode its own env group or
+    model group: `conf/model/{rmappo,mappo_mlp}_diffrew.yaml` are `rmappo` /
+    `mappo_mlp` plus `env.reward.mode: difference_rewards`.
+  - ⚠ **Runs before 2026-11-04 were trained with used-up POIs hidden** (the
+    old rule; see Observation). That rule is now `pois.hide_when_used_up:
+    true`, which is not in the results path either. Every run on disk then
+    (all 18 rover groups × 4 model groups × 10 trials) is in the same
+    directories new runs would use: relaunching with `checkpoint=true` skips
+    them as finished, and `evaluate=true` / `view=true` on one needs
+    `env.pois.hide_when_used_up=true`. The width is unchanged (16), so
+    without it an old policy loads and is scored silently under the new
+    observation. The results have not been moved (the author's choice,
+    2026-11-04).
   - No global-state hook: the critic reads the concatenated observations
     (64 dims at 4 rovers).
   - `view=true` writes the arena and trajectory PNGs (see JAX MAPPO).
@@ -656,7 +670,7 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   `poi_payout`). State (`state.py`) is a flat
   pytree of arrays: `RoverEnvState(rovers=RoverState(position, heading),
   pois=POIState(position, coupling, radius, value, rate, remaining, order,
-  hide_until_unlocked), t)`.
+  hide_until_unlocked, hide_when_used_up), t)`.
 - **Dynamics** (`BaseRoverEnv.move`). Action `a = [turn, speed]` in `[-1, 1]²`:
   - `heading <- wrap(heading + a0 * max_turn)`, wrapped to [-π, π);
   - `speed = (a1 + 1)/2 * max_speed`, set directly each step (not integrated),
@@ -676,11 +690,19 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
     divided by `n_agents − 1` (agents) or `n_pois` (POIs); bounded in [0, 1].
   - The agent block excludes self **by index**, so a co-located teammate is
     sensed.
-  - Used-up POIs are not sensed but still count in the `n_pois` denominator.
+  - **Every POI is sensed, used up or not** (since 2026-11-04). The block
+    carries no budget, so a used-up POI reads exactly like a live one: the
+    observation does not say which POIs are finished.
+    - `hide_when_used_up: true` (POI key: a `pois:` block default that an
+      entry overrides; the base group sets `false`) hides a POI once it is
+      used up. That was the only rule before 2026-11-04 (see the ⚠ above on
+      the runs on disk).
   - Locked POIs (see Temporal coupling) are sensed like unlocked ones, so the
     observation does not say which POIs can pay yet, unless the POI sets
-    `hide_until_unlocked` (see Temporal coupling). The rule is
-    `pois.visible(pois)`.
+    `hide_until_unlocked` (see Temporal coupling).
+  - A hidden POI (either flag) still counts in the `n_pois` denominator. The
+    rule is `pois.visible(pois)`:
+    `(remaining > 0 | ~hide_when_used_up) & (~hide_until_unlocked | unlocked)`.
   - `sensor_radius: null` = the arena diagonal (global sensing).
   - Binning goes through `environments/sectors.py:sector_onehot`.
 - **Default reward** (`CouplingDepletionReward`), on post-move positions:
@@ -732,15 +754,16 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   - **Hiding locked POIs (`hide_until_unlocked`, added 2026-11-03).** A POI
     with `hide_until_unlocked: true` is not sensed by the rovers while it is
     locked. It appears on the step it unlocks.
-    - What changes: the observation only, through `pois.visible(pois)`:
-      `remaining > 0 & (~hide_until_unlocked | unlocked)`. The reward and the
-      lock are unchanged: a flagged POI pays exactly when an unflagged one
-      would.
+    - What changes: the observation only, through `pois.visible(pois)` (see
+      Observation). The reward and the lock are unchanged: a flagged POI pays
+      exactly when an unflagged one would.
     - The rover critic reads the concatenated observations, so it does not
       see a hidden POI either.
-    - A hidden POI still counts in the `n_pois` normalizer, as a used-up one
-      does: while locked it reads exactly as used up, and once unlocked
-      exactly as an unflagged POI.
+    - A hidden POI still counts in the `n_pois` normalizer: while locked it
+      reads as absent, and once unlocked exactly as an unflagged POI. Since
+      2026-11-04 a used-up POI stays sensed by default, so a hidden locked POI
+      no longer reads as used up (it did under the old rule,
+      `hide_when_used_up: true`).
     - Set per entry in `pois.entries`, or as a `pois:` block default (like
       `radius` / `value` / `rate`) that an entry overrides; the base group
       sets `hide_until_unlocked: false`. One line hides every locked POI of
@@ -765,9 +788,36 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
       `rover_16a_2poi_c8`, `rover_6a_6poi_c3` and `rover_16a_6poi_c844844`
       (`_ord_hidden`). Their sensor radius (2.0, 2.0, 4.0) already keeps a
       locked POI out of range: it is farther than that from the spawn box
-      and from the POI being worked. There, hiding only acts when a rover
-      strays within range of a locked POI, so an `_ord` vs `_ord_hidden`
-      comparison on those layouts measures little.
+      and from the POI being worked. That holds for scripted rovers only:
+      trained rovers stray, and on `rover_6a_6poi_c3_ord` they had a locked
+      POI in range on 73-75% of rover-steps (next bullet).
+    - **Measured effect of hiding (2026-11-04, `rmappo_jax`, 4 arms × 10
+      trials, final return = mean evaluation over the last 10% of updates, as
+      a fraction of the maximum, `_ord` → `_ord_hidden`).** All trained under
+      the old rule (used-up POIs hidden); not re-measured since used-up POIs
+      became visible.
+      - `rover_4a_2poi_c2`: 0.98-1.00 → 0.99-1.00, no effect. Splitting into
+        two pairs solves the ordered task too: the pair at the locked POI
+        waits for it to unlock.
+      - `rover_4a_4poi_c1234`: 0.79-0.89 → 1.00 in every arm (p ≤ 0.02).
+        Hidden, one POI is sensed at a time and every coupling is ≤ 4, so the
+        whole team follows the one visible POI.
+      - `rover_6a_6poi_c3`: 0.04-0.06 → 0.24-0.46 in every arm (p < 0.001).
+        Replaying the `_ord` policies (64 episodes per trial): 55-62% of
+        rover-steps inside a locked POI's radius, and ≥ 3 rovers parked at
+        a locked POI on 53-63% of steps. Hidden: 6-7% and ~0%.
+      - `rover_16a_2poi_c8`: no significant change; POIs out of sensor range
+        from the spawn box limit every arm (≤ 0.33).
+      - `rover_16a_6poi_c844844`: only `mappo_mlp_diffrew` changes
+        significantly (0.41 → 0.63, p = 0.01); the `rmappo` arms are
+        slightly lower when hidden (n.s.).
+      - Why: the POI sectors sum presence over anonymous POIs in the rover's
+        heading frame, so a locked and an unlocked POI produce the same input.
+        Hiding makes "sensed" mean "pays now". The cost (under the old rule):
+        a hidden POI read as used up, so a feedforward critic could no longer
+        tell how many POIs were left. `mappo_mlp`'s late explained variance fell from 0.89 to 0.13
+        (`c1234`) and from 0.87 to 0.34 (`c2`), while its policy still solved
+        both. The GRU critic's rose.
     - Smoke-verified 2026-11-03: `rmappo_jax` trains (2 updates, CPU) and
       evaluates on `rover_4a_2poi_c2_ord01` (now `rover_4a_2poi_c2_ord`) with
       the flag on. Every variant builds with the flag off and on, observations
@@ -820,7 +870,7 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
     nearest POI can come second but never uniquely last (starting there and
     reversing the path is never longer).
   - Checked over 1000 spawn seeds: the scripted route 0-1-2 (`ROUTE_PLANS`
-    has it; `scripted_steps --variant rover_4a_3poi_c3_implicit012`) collects
+    has it; `scripted_steps --variant rover_4a_3poi_c3_implicit`) collects
     6.0 on every seed, in 93-98 steps, with 33-38 non-paying steps. A lower
     bound for any policy (heading-limited entry, then straight-line travel
     between disc edges, over every walk that uses the POIs up in that order)
@@ -867,7 +917,7 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
     and turns in place toward it. It never leaves a radius whose POI still has
     budget.
   - `plan_routes(env, state, teams)` assigns rovers to the routes of a team plan
-    (`ROUTE_PLANS[variant]`: `(route, n_rovers)` pairs), minimizing the latest
+    (`ROUTE_PLANS[group]`: `(route, n_rovers)` pairs), minimizing the latest
     entry into a first POI, then the distance to the parking point. Entry times
     come from `entry_steps`, which simulates the controller, so they are exact.
     The assignment runs on the host (scipy). `planned_rollouts(env, keys,
@@ -878,30 +928,76 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   the default, 6.0/6 in 89–92 on the ring, and 3.75–4.0/4 on `c1234`, where the
   coupling-4 POI is often still paying at step 100. Random rovers collect 0 on
   the coupling-2 and coupling-3 layouts.
-- **Steps to solve `rover_6poi_c8-4-4-8-4-4` (measured 2026-10-30, seeds
-  0–999).** Solved = every POI used up (return 6.0).
+- **Route plans for every group (`ROUTE_PLANS`, 2026-11-04).** One
+  hand-written team plan per rover env group, each the best of the candidates
+  tried (whole-team sequences, splits, visiting orders; 64 seeds each), not
+  proven optimal. The comments in `policies.py` give each plan's reasoning.
+  Each `_ord_hidden` group reuses its `_ord` group's plan: the scripted rovers
+  read the true state, so hiding changes nothing for them. A rover whose
+  target is locked parks there and waits. A test runs every plan, so a
+  renamed or deleted group must take its plan along.
   ```
-  uv run python -m environments.rover.scripted_steps [--n-seeds 1000] [--figures 2]
+  uv run python -m environments.rover.scripted_steps [--variants <group> ...] [--n-seeds 1000] [--figures 2]
+  bash scripts/visualize_rover_routes.sh [any of the flags above]
   ```
-  - **The plan.** Couplings sum to 32 = 2 × 16 rovers, so two waves: 8 rovers
-    on each coupling-8 POI, (10,12) and (10,8), about 2 units from the spawn
-    box; then 4 rovers per corner, each leaving from the nearer centre POI.
-  - **Route policy:** solves 1000 of 1000 seeds in 52–56 steps (median 54,
-    mean 53.71). The index-order scripted policy solves 937 of 1000 in 80–88.
-  - **Step count** = the step the last centre-team rover gets inside (3–7),
-    plus 49 on every seed: 20 coupled steps at the centre POIs, an 11-step leg
-    (disk gap 5.07 units at 0.5 per step), 20 coupled steps at the corners.
-  - **How close to optimal.** Two-wave lower bound = 49 + the best 8/8 split's
-    latest entry, each entry bounded with turning included (the heading turns
-    at most π/4 per step, so step t covers at most
-    0.5 · cos(max(0, |φ₀| − tπ/4)) along the initial bearing). The policy meets
-    this bound on 736 of 1000 seeds and is 1 step above on the other 264.
-    Corners first needs ≥ 59 steps. Any policy needs ≥ 50 (the 640 rover-steps
-    the POIs need could not otherwise be supplied). The two-wave bound is not
-    proven for every policy.
+  Without `--variants` (alias `--variant`) it runs every group in
+  `ROUTE_PLANS`, printing each plan's return and steps to solve over the
+  seeds. `--figures N` writes
+  `plotting/rover/trajectories/<group>_routed_seed<k>.png` for seeds
+  0..N-1. `scripts/visualize_rover_routes.sh` (added 2026-11-04) runs it from
+  any directory with `--figures 3 --n-seeds 3` (every group in about 30 s on
+  the CPU); its arguments override those. Measured over seeds 0–999 (steps = the step the last POI
+  is used up; every plan below collects the maximum on every seed except
+  `rover_6a_3poi_c3_implicit`):
+
+  | group | plan (`rovers × route`) | steps to solve, median (range) |
+  |---|---|---|
+  | `rover_4a_2poi_c2` | 2 × 0, 2 × 1 | 17 (15–19) |
+  | `rover_4a_2poi_c2_ord` (`_hidden`) | 2 × 0, 2 × 1 (second pair waits) | 27 (24–29) |
+  | `rover_4a_2poi_c2_implicit` | 2 × 0, 2 × 1 | 68 (64–70) |
+  | `rover_16a_2poi_c8` | 8 × 0, 8 × 1 | 17 (16–18) |
+  | `rover_16a_2poi_c8_ord` (`_hidden`) | 8 × 0, 8 × 1 (second eight wait) | 27 (25–28) |
+  | `rover_2a_3poi_c2_implicit` | 2 × 0→1→2 | 95 (93–98) |
+  | `rover_4a_3poi_c3_implicit` | 4 × 0→1→2 | 94 (93–98) |
+  | `rover_4a_4poi_c1234` | 2 × 3→2→1, 1 × 3→2, 1 × 3→0 | 60 (56–64) |
+  | `rover_4a_4poi_c1234_ord` (`_hidden`) | 1 × 0→3, 2 × 1→2→3, 1 × 2→3 | 67 (65–71) |
+  | `rover_6a_6poi_c3` | 3 × 0→1→2, 3 × 3→4→5 | 42 (40–45) |
+  | `rover_6a_6poi_c3_ord` (`_hidden`) | 3 × 0→2→4, 3 × 1→3→5 (teams alternate) | 66 (63–69) |
+  | `rover_16a_6poi_c844844` | 4 × 0→2, 4 × 0→1, 4 × 3→5, 4 × 3→4 | 34 (32–37) |
+  | `rover_16a_6poi_c844844_ord` (`_hidden`) | same | 44 (42–47) |
+  | `rover_6a_3poi_c3_implicit` | 3 × 2→0, 3 × 1 | never solved: return 7.88 of 10 |
+
+  - Against the alternatives tried (64 seeds): the whole team working POIs
+    one after another takes 40 steps on the two-POI groups (vs 17 and 27),
+    77 on `c1234` and `c1234_ord`, and 80 on the ring and the ordered ring.
+    On `rover_4a_2poi_c2_implicit` it never finishes (8.0 of 9). On the
+    `_implicit` 3-POI groups every other visiting order collects 61-89%.
+  - `rover_6a_3poi_c3_implicit` cannot be solved as configured: its POIs need
+    100, 150 and 60 coupled steps (value / rate), and two teams of 3 supply
+    at most 200 in 100 steps. The index-order scripted policy collects 2.71
+    (seed 0).
+  - **`rover_16a_6poi_c844844`, the timing.** Couplings sum to 32 = 2 × 16
+    rovers, so two waves: 8 rovers on each coupling-8 POI, (10,12) and
+    (10,8), about 2 units from the spawn box; then 4 rovers per corner, each
+    leaving from the nearer centre POI. The centre POIs are used up exactly 9
+    steps after the last centre-team rover gets inside (3–7). The corners
+    follow 20 steps later (an 11-step leg, disk gap 5.07 units at 0.5 per
+    step, then 10 coupled steps) on 87% of seeds, 21–22 on the rest, when a
+    late rover is still turning toward its corner as its centre POI runs out.
+    Under `_ord` the left corners (order 2) wait for the right ones: +10.
+  - Measured 2026-10-30 under the old rate 0.05 (20 coupled steps per POI),
+    as `rover_6poi_c8-4-4-8-4-4`: 52–56 steps, always last centre entry + 49;
+    the plan met a two-wave lower bound (49 + the best 8/8 split's latest
+    entry, turning included) on 736 of 1000 seeds and was 1 step above on the
+    rest. The bound's script is not in the repository and was not re-run at
+    rate 0.1.
 - **Figures** (`visualize.py`, matplotlib, dataviz reference palette):
   `uv run python -m environments.rover.visualize [--variants ...] [--seeds 0 1]
-  [--policies random scripted] [--no-trajectories]` writes
+  [--policies random scripted] [--no-trajectories]` writes the files below.
+  `bash scripts/visualize_rover_arenas.sh` (added 2026-11-04) is a thin
+  wrapper that runs it from any directory with `--no-trajectories` for every
+  group. `TRAJECTORIES=1` adds the trajectory figures; any further arguments
+  are passed through. The Python script writes
   - `plotting/rover/arenas/<variant>.png` for every `conf/env/rover_*.yaml`:
     the arena, each POI's radius disc with its coupling inside and value / rate
     below, and one rover's sensing radius at the spawn-region centre
@@ -917,19 +1013,23 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   (multi-agent particle environment) demo with random actions; it is not part
   of the rover domain and nothing imports it. It is the only remaining user of
   the `jaxmarl` package.
-- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (56 tests,
-  CPU; 27 fail on stale variant names, see Loose ends). Hiding: the flag's
-  default and per-entry override; a flagged POI absent until it unlocks, then
-  sensed exactly as an unflagged one; over a jitted episode of
-  `rover_4a_2poi_c2_ord`, a flagged POI reads as used up while locked and
-  trajectories and rewards are unchanged; a non-boolean value rejected; the
-  no-effect warning. Temporal coupling: orders default to 0, `unlocked` with ties and gaps,
+- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (77 tests,
+  CPU; 24 fail on stale variant names, see Loose ends). Used-up POIs: sensed
+  exactly like live ones by default and gone under `hide_when_used_up`; the
+  flag off in every variant, its per-entry override and a non-boolean value
+  rejected; over a jitted episode of `rover_4a_2poi_c2_ord`, the default and
+  the old rule observe the same until a POI is used up and differ after.
+  Hiding: the flag's default and per-entry override; a flagged POI absent
+  until it unlocks, then sensed exactly as an unflagged one; over a jitted
+  episode of `rover_4a_2poi_c2_ord`, a flagged POI reads as absent while
+  locked and trajectories and rewards are unchanged; a non-boolean value
+  rejected; the no-effect warning. Temporal coupling: orders default to 0, `unlocked` with ties and gaps,
   a later POI paying from the step after the earlier one is used up, a locked
   POI paying no one (difference rewards included), the `G − G_{−i}` check
   repeated with orders, the scripted team working ordered POIs in order (2
   rovers; ignoring the lock scores 0), bad orders rejected, the never-unlocks
   warning, and the figures' order labels. The rest cover shapes, jit and vmap; the sector frame and ±22.5° boundaries; exact
-  presence values; co-located teammates; invisible used-up POIs; observations in
+  presence values; co-located teammates; observations in
   [0, 1] over random rollouts of every variant; turn/speed mapping, heading
   wrap, wall clip; coupling and the inclusive radius; the shared reward;
   both reward modes (`step`'s reward = `info[mode]`, team reward `G`), a
@@ -942,6 +1042,9 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   `obs_dim` being rejected; variant composition (dynamics and observation type
   inherited, `sensor_radius` free); Hydra overrides; the
   bad-config errors; the scripted team; the frozen rollout; population vmap;
-  determinism; the route policy on `rover_6poi_c8-4-4-8-4-4` (return 6.0 in
-  exactly last centre entry + 49 steps, no rover leaving a POI that needs it,
-  plan validation); the PNG writers for every variant.
+  determinism; the route policy on `rover_16a_6poi_c844844` (return 6.0, the
+  centre POIs used up at last centre entry + 9 and the episode solved within
+  + 29 to + 31 steps, no rover leaving a POI that needs it, plan validation);
+  every `ROUTE_PLANS` entry (one test per group: names a current group, uses
+  every POI up on 2 seeds or reaches its floor, never abandons a POI); the PNG
+  writers for every variant.

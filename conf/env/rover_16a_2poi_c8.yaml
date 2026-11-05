@@ -4,8 +4,6 @@ defaults:
   - _self_
 env:
   n_agents: 16
-  observation:
-    sensor_radius: 2.0        # was the arena diagonal: every rover saw everything
   pois:
     entries:
       - {position: [2.0, 8.0], coupling: 8}

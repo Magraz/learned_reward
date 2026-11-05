@@ -34,6 +34,9 @@ class POIState:
     # (P,) bool: the POI is hidden from the rovers' observations while it is
     # locked by its order (see ``pois.visible``).
     hide_until_unlocked: jax.Array
+    # (P,) bool: the POI is hidden from the rovers' observations once it is
+    # used up. Off by default: used-up POIs are sensed like live ones.
+    hide_when_used_up: jax.Array
 
 
 @jax.tree_util.register_dataclass

@@ -1,15 +1,17 @@
-"""Count the steps the planned scripted team needs to solve a rover variant.
+"""Count the steps the planned scripted team needs to solve rover env groups.
 
 Runs ``policies.planned_rollouts`` (``make_route_policy`` on the routes
-``plan_routes`` assigns from ``ROUTE_PLANS[variant]``) over many reset seeds
-and prints how often every POI is used up, and in how many steps::
+``plan_routes`` assigns from ``ROUTE_PLANS[group]``) over many reset seeds
+and prints, per group, how often every POI is used up, and in how many steps::
 
     uv run python -m environments.rover.scripted_steps \\
-        [--variant rover_6poi_c8-4-4-8-4-4] [--n-seeds 1000] [--figures 2]
+        [--variants rover_16a_6poi_c844844 ...] [--n-seeds 1000] [--figures 2]
 
-Seed k is ``jax.random.PRNGKey(k)``, the same episode ``visualize`` draws for
-``--seeds k``. ``--figures N`` saves the first N episodes as
-``<out-dir>/trajectories/<variant>_routed_seed<k>.png``.
+Without ``--variants`` (or its alias ``--variant``) it runs every group in
+``ROUTE_PLANS``. Seed k is ``jax.random.PRNGKey(k)``, the same episode
+``visualize`` draws for ``--seeds k``. ``--figures N`` saves the first N
+episodes of each group as ``<out-dir>/trajectories/<group>_routed_seed<k>.png``;
+``scripts/visualize_rover_routes.sh`` runs it for every group.
 """
 
 import argparse
@@ -35,26 +37,18 @@ def solve_steps(traj):
     return steps, used_at
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--variant", default="rover_6poi_c8-4-4-8-4-4", choices=sorted(ROUTE_PLANS))
-    parser.add_argument("--n-seeds", type=int, default=1000)
-    parser.add_argument("--first-seed", type=int, default=0)
-    parser.add_argument("--figures", type=int, default=0,
-                        help="save trajectory figures of the first N seeds")
-    parser.add_argument("--out-dir", type=Path, default=REPO_ROOT / "plotting" / "rover")
-    args = parser.parse_args(argv)
-
-    env = load_rover_env(args.variant)
-    teams = ROUTE_PLANS[args.variant]
-    seeds = np.arange(args.first_seed, args.first_seed + args.n_seeds)
+def report(variant, seeds, figures, out_dir):
+    """Run ``variant``'s plan on ``seeds``, print its statistics and save the
+    first ``figures`` episodes."""
+    env = load_rover_env(variant)
+    teams = ROUTE_PLANS[variant]
     keys = jax.vmap(jax.random.PRNGKey)(jnp.asarray(seeds))
     traj, routes = planned_rollouts(env, keys, teams)
     steps, used_at = solve_steps(traj)
     returns = np.asarray(traj.episode_return)
     solved = steps >= 0
 
-    print(f"{args.variant}: {env.n_agents} rovers, {env.n_pois} POIs, max_steps {env.max_steps}")
+    print(f"{variant}: {env.n_agents} rovers, {env.n_pois} POIs, max_steps {env.max_steps}")
     print("plan: " + ", ".join(f"{size} x {' -> '.join(map(str, route))}" for route, size in teams))
     print(f"seeds {seeds[0]}..{seeds[-1]}: solved {solved.sum()} / {len(seeds)}, "
           f"return mean {returns.mean():.4f} (max {float(env.pois.value.sum()):.1f})")
@@ -67,17 +61,36 @@ def main(argv=None):
         print("  POI used up at step (median): " + ", ".join(
             f"POI {p} {np.median(used_at[solved, p]):.0f}" for p in range(env.n_pois)))
 
-    if args.figures:
+    if figures:
         import matplotlib
 
         matplotlib.use("Agg")
         from environments.rover.visualize import plot_trajectory, save_figure
 
-        for i, seed in enumerate(seeds[: args.figures]):
+        for i, seed in enumerate(seeds[:figures]):
             one = jax.tree.map(lambda x: x[i], traj)
-            title = f"{args.variant} · routed policy · seed {seed}"
-            out = args.out_dir / "trajectories" / f"{args.variant}_routed_seed{seed}.png"
+            title = f"{variant} · routed policy · seed {seed}"
+            out = out_dir / "trajectories" / f"{variant}_routed_seed{seed}.png"
             print(save_figure(plot_trajectory(env, one, title), out))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--variants", "--variant", nargs="+", default=None,
+                        choices=sorted(ROUTE_PLANS), metavar="GROUP",
+                        help="rover env groups (default: every group in ROUTE_PLANS)")
+    parser.add_argument("--n-seeds", type=int, default=1000)
+    parser.add_argument("--first-seed", type=int, default=0)
+    parser.add_argument("--figures", type=int, default=0,
+                        help="save trajectory figures of the first N seeds of each group")
+    parser.add_argument("--out-dir", type=Path, default=REPO_ROOT / "plotting" / "rover")
+    args = parser.parse_args(argv)
+
+    seeds = np.arange(args.first_seed, args.first_seed + args.n_seeds)
+    for k, variant in enumerate(args.variants or sorted(ROUTE_PLANS)):
+        if k:
+            print()
+        report(variant, seeds, args.figures, args.out_dir)
 
 
 if __name__ == "__main__":

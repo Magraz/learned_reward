@@ -154,13 +154,21 @@ def test_co_located_teammates_are_sensed_and_presence_reaches_one():
     assert float(obs.max()) <= 1.0
 
 
-def test_used_up_pois_are_not_sensed():
-    env = make_env(entries=[{"position": [7.0, 5.0], "coupling": 2}])
+def test_used_up_pois_are_sensed_like_live_ones_unless_flagged():
+    entry = {"position": [7.0, 5.0], "coupling": 2}
+    env = make_env(entries=[entry])
     R = env.world_diagonal
     live = env.observe(state_at(env, [[5, 5], [1, 1]], remaining=[0.4]))
     np.testing.assert_allclose(live[0, 8:], np.eye(8)[0] * (1 - 2 / R), rtol=1e-6)
     used = env.observe(state_at(env, [[5, 5], [1, 1]], remaining=[0.0]))
-    np.testing.assert_allclose(used[:, 8:], 0.0)
+    np.testing.assert_array_equal(used, live)
+    # hide_when_used_up: sensed while live, gone once used up (the old rule).
+    flagged = make_env(entries=[{**entry, "hide_when_used_up": True}])
+    np.testing.assert_array_equal(
+        flagged.observe(state_at(flagged, [[5, 5], [1, 1]], remaining=[0.4])), live
+    )
+    hidden = flagged.observe(state_at(flagged, [[5, 5], [1, 1]], remaining=[0.0]))
+    np.testing.assert_allclose(hidden[:, 8:], 0.0)
 
 
 def test_observations_stay_in_unit_interval_over_random_rollouts():
@@ -475,41 +483,88 @@ def test_a_flagged_poi_is_hidden_until_it_unlocks():
     np.testing.assert_allclose(locked[0, 8:], np.eye(8)[4] * one, rtol=1e-6)
     unflagged = plain.observe(state_at(plain, [[5, 5], [1, 1]], remaining=[1.0, 1.0]))
     np.testing.assert_allclose(unflagged[0, 8:], (np.eye(8)[0] + np.eye(8)[4]) * one, rtol=1e-6)
-    # Unlocked: sensed with the same presence as an unflagged POI (same normalizer).
+    # Unlocked: sensed with the same presence as an unflagged POI (same
+    # normalizer), and the used-up P0 is still sensed behind the rover.
     unlocked_obs = env.observe(state_at(env, [[5, 5], [1, 1]], remaining=[0.0, 1.0]))
-    np.testing.assert_allclose(unlocked_obs[0, 8:], np.eye(8)[0] * one, rtol=1e-6)
+    np.testing.assert_allclose(
+        unlocked_obs[0, 8:], (np.eye(8)[0] + np.eye(8)[4]) * one, rtol=1e-6
+    )
 
 
-def test_a_flagged_poi_reads_as_used_up_while_locked_and_the_task_is_unchanged():
+def observe_along(env, traj, remaining, key=jax.random.PRNGKey(0)):
+    """(T+1, A, obs_dim) observations of ``env`` at a trajectory's poses, with
+    the POI budgets ``remaining`` (T+1, P) in place of the env's own."""
+    pois = env.reset(key)[1].pois
+    return np.asarray(jax.vmap(lambda p, h, r: env.observe(RoverEnvState(
+        RoverState(p, h), dataclasses.replace(pois, remaining=r), jnp.zeros((), jnp.int32)
+    )))(traj.positions, traj.headings, remaining))
+
+
+def scripted_episode(env, key=jax.random.PRNGKey(0)):
+    return jax.jit(lambda k: rollout(env, make_scripted_coalition_policy(env), k))(key)
+
+
+def test_a_flagged_poi_is_absent_while_locked_and_the_task_is_unchanged():
     """A jitted episode of rover_4a_2poi_c2_ord with P1 flagged: while P0 has
-    budget the observation equals one where P1 is used up; once P0 is used up
-    it equals the unflagged env's. Trajectories and rewards are identical."""
-    cfg = load_env_config("rover_4a_2poi_c2_ord")
-    plain = make_rover_env(cfg)
-    cfg["pois"]["entries"][1]["hide_until_unlocked"] = True
-    env = make_rover_env(cfg)
-    key = jax.random.PRNGKey(0)
-    traj = jax.jit(lambda k: rollout(env, make_scripted_coalition_policy(env), k))(key)
-    plain_traj = jax.jit(lambda k: rollout(plain, make_scripted_coalition_policy(plain), k))(key)
+    budget the observation equals one without P1 (P1 used up under
+    hide_when_used_up, same normalizer); once P0 is used up it equals the
+    unflagged env's. Trajectories and rewards are identical."""
+    def with_p1(**flags):
+        cfg = load_env_config("rover_4a_2poi_c2_ord")
+        cfg["pois"]["entries"][1].update(flags)
+        return make_rover_env(cfg)
+
+    plain = with_p1()
+    without_p1 = with_p1(hide_when_used_up=True)
+    env = with_p1(hide_until_unlocked=True)
+    traj, plain_traj = scripted_episode(env), scripted_episode(plain)
     np.testing.assert_array_equal(traj.positions, plain_traj.positions)
     np.testing.assert_array_equal(traj.rewards, plain_traj.rewards)
 
-    def observe(env, remaining):
-        pois = env.reset(key)[1].pois
-        return jax.vmap(lambda p, h, r: env.observe(RoverEnvState(
-            RoverState(p, h), dataclasses.replace(pois, remaining=r), jnp.zeros((), jnp.int32)
-        )))(traj.positions, traj.headings, remaining)
-
     remaining = traj.poi_remaining
-    obs = np.asarray(observe(env, remaining))
-    as_used_up = np.asarray(observe(env, remaining.at[:, 1].set(0.0)))
-    unflagged = np.asarray(observe(plain, remaining))
+    obs = observe_along(env, traj, remaining)
+    absent = observe_along(without_p1, traj, remaining.at[:, 1].set(0.0))
+    unflagged = observe_along(plain, traj, remaining)
     locked = np.asarray(remaining[:, 0] > 0)
     after = ~locked & np.asarray(remaining[:, 1] > 0)
     assert locked.any() and after.any()  # the episode reaches both phases
-    np.testing.assert_array_equal(obs[locked], as_used_up[locked])
+    np.testing.assert_array_equal(obs[locked], absent[locked])
     np.testing.assert_array_equal(obs[after], unflagged[after])
     assert not np.array_equal(obs[locked], unflagged[locked])
+
+
+def test_hide_when_used_up_defaults_off_in_every_variant_and_an_entry_overrides_it():
+    entries = [{"position": [2.0, 5.0], "coupling": 1},
+               {"position": [8.0, 5.0], "coupling": 1, "hide_when_used_up": True}]
+    _, state = make_env(entries=entries).reset(jax.random.PRNGKey(0))
+    np.testing.assert_array_equal(state.pois.hide_when_used_up, [False, True])
+    assert state.pois.hide_when_used_up.dtype == jnp.bool_
+    entries[1]["hide_when_used_up"] = False
+    pois = StaticPOIs(entries, hide_when_used_up=True)
+    np.testing.assert_array_equal(pois.hide_when_used_up, [True, False])
+    with pytest.raises(ValueError, match="hide_when_used_up must be true or false"):
+        make_env(entries=[{"position": [5.0, 5.0], "coupling": 1, "hide_when_used_up": 1}])
+    for variant in list_variants():
+        _, state = load_rover_env(variant).reset(jax.random.PRNGKey(0))
+        assert not state.pois.hide_when_used_up.any(), variant
+
+
+def test_used_up_pois_change_the_observation_only_once_used_up():
+    """Over a scripted episode of rover_4a_2poi_c2_ord, the default and the old
+    rule (hide_when_used_up) observe the same until a POI is used up, and differ
+    afterwards wherever a rover is in range of the used-up POI."""
+    env = load_rover_env("rover_4a_2poi_c2_ord")
+    old_rule = load_rover_env("rover_4a_2poi_c2_ord", ["env.pois.hide_when_used_up=true"])
+    traj = scripted_episode(env)
+    remaining = traj.poi_remaining
+    new = observe_along(env, traj, remaining)
+    old = observe_along(old_rule, traj, remaining)
+    none_used = np.asarray((remaining > 0).all(axis=1))
+    assert none_used.any() and (~none_used).any()
+    np.testing.assert_array_equal(new[none_used], old[none_used])
+    # Global sensing: once a POI is used up, every rover still senses it by default.
+    assert (new[~none_used, :, 8:] > old[~none_used, :, 8:]).any(axis=(1, 2)).all()
+    np.testing.assert_array_equal(new[..., :8], old[..., :8])  # agent block untouched
 
 
 def test_hide_until_unlocked_must_be_a_bool_and_warns_where_it_never_acts():
@@ -691,39 +746,71 @@ def test_rollout_vmaps_over_a_population_of_policy_parameters():
     assert fitness.shape == (5,) and np.all(np.isfinite(np.asarray(fitness)))
 
 
-ROUTED_VARIANT = "rover_6poi_c8-4-4-8-4-4"
+ROUTED_VARIANT = "rover_16a_6poi_c844844"
 
 
-def test_routed_team_solves_its_variant_in_planned_entry_plus_49_steps():
-    """20 coupled steps at the centre POIs, an 11-step leg (disk gap 5.07 at
-    0.5 per step), 20 at the corners: the episode ends 49 steps after the
-    last centre-team rover gets inside."""
+def test_routed_team_solves_its_variant_in_planned_entry_plus_29_steps():
+    """The centre POIs pay from the step the last centre-team rover gets
+    inside, so they are used up 9 steps later. Then an 11-step leg (disk gap
+    5.07 at 0.5 per step) and 10 coupled steps at the corners end the episode
+    29 steps after that entry, or up to 2 more when a late rover is still
+    turning toward its corner as its centre POI is used up (13% of seeds; at
+    the old rate 0.05 the centre took 20 steps and there was always time)."""
     env = load_rover_env(ROUTED_VARIANT)
     keys = jax.vmap(jax.random.PRNGKey)(jnp.arange(8))
     traj, routes = planned_rollouts(env, keys, ROUTE_PLANS[ROUTED_VARIANT])
     np.testing.assert_allclose(traj.episode_return, 6.0, atol=1e-5)
-    steps, _ = solve_steps(traj)
+    steps, used_at = solve_steps(traj)
     for i in range(8):
         _, state, _ = rollout_reset(env, keys[i])
         entry = np.asarray(entry_steps(env, state.rovers, state.pois))
         last_entry = max(entry[r, routes[i, r, 0]] for r in range(env.n_agents))
-        assert steps[i] == last_entry + 49
+        assert used_at[i, [0, 3]].max() == last_entry + 9
+        assert last_entry + 29 <= steps[i] <= last_entry + 31
+
+
+def assert_routed_rovers_stay_while_needed(env, traj, routes):
+    """No routed rover leaves its target's radius while the target has budget."""
+    centre, radius = np.asarray(env.pois.position), np.asarray(env.pois.radius)
+    pos, remaining = np.asarray(traj.positions), np.asarray(traj.poi_remaining)
+    rows = np.arange(env.n_agents)
+    for i in range(pos.shape[0]):
+        for t in range(env.max_steps):
+            left = remaining[i, t][routes[i]] > 0  # (A, K)
+            target = routes[i][rows, left.argmax(axis=1)]
+            inside = np.linalg.norm(pos[i, t] - centre[target], axis=-1) <= radius[target]
+            still_needed = left.any(axis=1) & (remaining[i, t + 1][target] > 0)
+            after = np.linalg.norm(pos[i, t + 1] - centre[target], axis=-1) <= radius[target]
+            assert np.all(after[inside & still_needed])
 
 
 def test_routed_rovers_never_leave_a_poi_that_still_needs_them():
     env = load_rover_env(ROUTED_VARIANT)
     keys = jax.vmap(jax.random.PRNGKey)(jnp.arange(4))
     traj, routes = planned_rollouts(env, keys, ROUTE_PLANS[ROUTED_VARIANT])
-    centre = np.asarray(env.pois.position)
-    pos, remaining = np.asarray(traj.positions), np.asarray(traj.poi_remaining)
-    for i in range(4):
-        for t in range(env.max_steps):
-            left = remaining[i, t][routes[i]] > 0  # (A, K)
-            target = routes[i][np.arange(env.n_agents), left.argmax(axis=1)]
-            inside = np.linalg.norm(pos[i, t] - centre[target], axis=-1) <= 1.0
-            still_needed = left.any(axis=1) & (remaining[i, t + 1][target] > 0)
-            after = np.linalg.norm(pos[i, t + 1] - centre[target], axis=-1) <= 1.0
-            assert np.all(after[inside & still_needed])
+    assert_routed_rovers_stay_while_needed(env, traj, routes)
+
+
+# Groups whose POIs need more coupled steps than the rovers can supply in one
+# episode: the floor below their plan's return (7.88 of 10 over 1000 seeds).
+ROUTE_PLAN_FLOORS = {"rover_6a_3poi_c3_implicit": 7.5}
+
+
+@pytest.mark.parametrize("variant", sorted(ROUTE_PLANS))
+def test_every_route_plan_names_a_current_group_and_solves_it(variant):
+    """A renamed or deleted group must take its plan along; every plan's team
+    uses every POI up (or reaches its floor) and never abandons a POI."""
+    assert variant in list_variants(), f"ROUTE_PLANS names {variant}, which has no conf/env file"
+    env = load_rover_env(variant)
+    keys = jax.vmap(jax.random.PRNGKey)(jnp.arange(2))
+    traj, routes = planned_rollouts(env, keys, ROUTE_PLANS[variant])
+    returns = np.asarray(traj.episode_return)
+    if variant in ROUTE_PLAN_FLOORS:
+        assert np.all(returns >= ROUTE_PLAN_FLOORS[variant])
+    else:
+        np.testing.assert_allclose(returns, float(env.pois.value.sum()), atol=1e-5)
+        assert np.all(solve_steps(traj)[0] >= 0)
+    assert_routed_rovers_stay_while_needed(env, traj, routes)
 
 
 def test_plan_routes_fills_each_team_and_rejects_bad_plans():

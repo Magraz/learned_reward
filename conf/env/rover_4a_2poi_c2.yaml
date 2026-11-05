@@ -38,12 +38,17 @@ env:
     value: 1.0                       # total reward a POI can pay per episode
     rate: 0.1                       # paid per step while coupling is met
     hide_until_unlocked: false       # true: hidden from the rovers while locked
+    # false: a used-up POI is still sensed, exactly like a live one.
+    # true: hidden once used up (the rule of every run before 2026-11-04;
+    # pass it to evaluate or view those runs). Not in the results path.
+    hide_when_used_up: false
     # An entry may also set `order` (integer >= 0, default 0), its temporal
     # coupling: it pays only once every POI of a lower order is used up.
     # Equal orders (the default) leave the POIs free to be used in any order.
     # An entry may override `hide_until_unlocked`: a flagged POI is not sensed
     # while it is locked. A POI of the lowest order is never locked, so the
-    # flag only acts on a POI with a higher order.
+    # flag only acts on a POI with a higher order. An entry may also override
+    # `hide_when_used_up`.
     entries:
       - {position: [2.0, 8.0], coupling: 2}
       - {position: [8.0, 2.0], coupling: 2}

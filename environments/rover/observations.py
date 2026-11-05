@@ -24,13 +24,14 @@ class SectorDensityObservation(ObservationModel):
     the POI block. Every term is in (0, 1] and at most ``total`` entities can be
     in one sector, so the value lies in [0, 1]: it grows with how many entities
     are in the sector and with how close they are. The agent block excludes the
-    rover itself by index, so a co-located teammate is still sensed. Used-up
-    POIs (``remaining == 0``) are not sensed, but still count in the total, so
-    the signal of the POIs that remain does not rescale as others deplete.
-    Locked POIs (a lower-order POI still has budget, see ``pois.unlocked``)
-    are sensed like unlocked ones, unless the POI sets ``hide_until_unlocked``:
-    then it is not sensed until it unlocks, and like a used-up POI it still
-    counts in the total. ``pois.visible`` is the rule.
+    rover itself by index, so a co-located teammate is still sensed. Every POI
+    is sensed, used up or not, and the block carries no budget, so a used-up
+    POI reads exactly like a live one. Locked POIs (a lower-order POI still has
+    budget, see ``pois.unlocked``) are sensed like unlocked ones too. Two POI
+    flags hide a POI: ``hide_until_unlocked`` while it is locked, and
+    ``hide_when_used_up`` once it is used up (the rule before 2026-11-04). A
+    hidden POI still counts in the total, so the signal of the other POIs does
+    not rescale. ``pois.visible`` is the rule.
 
     Args:
         n_sectors: sectors per block; ``obs_dim = 2 * n_sectors``.
