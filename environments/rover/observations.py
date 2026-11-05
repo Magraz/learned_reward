@@ -28,8 +28,10 @@ class SectorDensityObservation(ObservationModel):
     is sensed, used up or not, and the block carries no budget, so a used-up
     POI reads exactly like a live one. Locked POIs (a lower-order POI still has
     budget, see ``pois.unlocked``) are sensed like unlocked ones too. Two POI
-    flags hide a POI: ``hide_until_unlocked`` while it is locked, and
-    ``hide_when_used_up`` once it is used up (the rule before 2026-11-04). A
+    flags hide a POI: ``hide_until_unlocked`` until its order is reached
+    (``pois.order_reached``, also when ``enforce_order`` is false and the
+    order locks nothing), and ``hide_when_used_up`` once it is used up (the
+    rule before 2026-11-04). A
     hidden POI still counts in the total, so the signal of the other POIs does
     not rescale. ``pois.visible`` is the rule.
 

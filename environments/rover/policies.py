@@ -62,8 +62,17 @@ ROUTE_PLANS = {
     # at 3; a pair waits at 1, then joins the rover waiting at 2; those three
     # then join it at 3.
     "rover_4a_4poi_c1234_ord": (((0, 3), 1), ((1, 2, 3), 2), ((2, 3), 1)),
-    # Two teams of 3, each working three neighbouring POIs of the ring.
-    "rover_6a_6poi_c3": (((0, 1, 2), 3), ((3, 4, 5), 3)),
+    # Two rings: inner POIs 0-2 pay 0.01 per step and are never used up within
+    # the episode (100 coupled steps each); outer POIs 3-5 pay 1.0 in 5 steps
+    # but lie 6 from the centre. One team parks on the lower-right inner POI
+    # for the whole episode (POI 0 after it is never reached: the policy moves
+    # on only when a POI is used up, but plan_routes needs every POI on some
+    # route). The other uses up the right, left and bottom outer POIs, then
+    # parks on the lower-left inner one. Best of all 1800 two-team plans
+    # (16 seeds), tied with its rotations and mirror images; splitting the
+    # outer POIs between the teams scores slightly less, the whole team of 6
+    # together much less (see CLAUDE.md).
+    "rover_6a_6poi_c3": (((2, 0), 3), ((3, 4, 5, 1), 3)),
     # Strict order 0-...-5: the teams alternate, each driving to its next POI
     # (two along the ring) while the other team works the one in between.
     "rover_6a_6poi_c3_ord": (((0, 2, 4), 3), ((1, 3, 5), 3)),

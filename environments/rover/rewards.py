@@ -43,10 +43,12 @@ class CouplingDepletionReward(RewardModel):
 
     * a rover observes POI p when ``||rover - p|| <= radius_p`` (inclusive);
     * p is active when at least ``coupling_p`` rovers observe it, it has
-      budget left, and every POI of a lower ``order`` is used up (temporal
-      coupling, ``pois.unlocked``). Rovers beyond the coupling add nothing.
-      The lock is read from the budgets at the start of the step, so a POI
-      unlocks on the step after the last earlier POI's final payout;
+      budget left, and it is unlocked: every POI of a lower ``order`` is used
+      up (temporal coupling), or p does not enforce its order
+      (``enforce_order`` false); see ``pois.unlocked``. Rovers beyond the
+      coupling add nothing. The lock is read from the budgets at the start of
+      the step, so a POI unlocks on the step after the last earlier POI's
+      final payout;
     * an active POI pays ``min(rate_p, remaining_p)`` and its budget drops by
       that much, so it pays a steady rate until used up and then nothing for
       the rest of the episode;

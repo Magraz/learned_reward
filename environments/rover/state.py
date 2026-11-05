@@ -28,11 +28,16 @@ class POIState:
     value: jax.Array  # (P,) total reward the POI can pay in an episode
     rate: jax.Array  # (P,) reward paid per step while the coupling is met
     remaining: jax.Array  # (P,) budget left this episode; 0 = used up
-    # (P,) int32 consumption order (temporal coupling): a POI can pay only once
-    # every POI of a lower order is used up. Equal orders constrain nothing.
+    # (P,) int32 consumption order (temporal coupling): a POI's order is
+    # reached once every POI of a lower order is used up. Equal orders
+    # constrain nothing.
     order: jax.Array
-    # (P,) bool: the POI is hidden from the rovers' observations while it is
-    # locked by its order (see ``pois.visible``).
+    # (P,) bool: the POI can pay only once its order is reached (see
+    # ``pois.unlocked``). False: the order no longer locks its reward and acts
+    # only through ``hide_until_unlocked``.
+    enforce_order: jax.Array
+    # (P,) bool: the POI is hidden from the rovers' observations until its
+    # order is reached (see ``pois.visible``).
     hide_until_unlocked: jax.Array
     # (P,) bool: the POI is hidden from the rovers' observations once it is
     # used up. Off by default: used-up POIs are sensed like live ones.

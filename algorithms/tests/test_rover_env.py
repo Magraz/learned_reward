@@ -39,7 +39,7 @@ from environments.rover.policies import (
     planned_rollouts,
     random_policy,
 )
-from environments.rover.pois import unlocked
+from environments.rover.pois import order_reached, unlocked
 from environments.rover.rollout import rollout, rollout_reset
 from environments.rover.scripted_steps import solve_steps
 
@@ -448,7 +448,7 @@ def test_a_locked_poi_pays_no_one_even_with_its_coupling_met():
 def test_the_scripted_team_works_ordered_pois_in_their_order():
     """Two rovers, P1 ordered before P0: index order alone would park both at
     the locked P0 forever."""
-    cfg = load_env_config("rover_2poi_c2", ["env.n_agents=2"])
+    cfg = load_env_config("rover_4a_2poi_c2", ["env.n_agents=2"])
     cfg["pois"]["entries"][0]["order"] = 1
     env = make_rover_env(cfg)
     traj = rollout(env, make_scripted_coalition_policy(env), jax.random.PRNGKey(0))
@@ -456,6 +456,15 @@ def test_the_scripted_team_works_ordered_pois_in_their_order():
     remaining = np.asarray(traj.poi_remaining)
     used_at = [int(np.argmax(remaining[:, k] <= 0)) for k in range(2)]
     assert used_at[1] < used_at[0]
+    # Not enforced, the order locks nothing: the team goes back to index order.
+    cfg["pois"]["enforce_order"] = False
+    with pytest.warns(UserWarning, match="the order has no effect"):
+        env = make_rover_env(cfg)
+    traj = rollout(env, make_scripted_coalition_policy(env), jax.random.PRNGKey(0))
+    np.testing.assert_allclose(traj.episode_return, 2.0, atol=1e-5)
+    remaining = np.asarray(traj.poi_remaining)
+    used_at = [int(np.argmax(remaining[:, k] <= 0)) for k in range(2)]
+    assert used_at[0] < used_at[1]
 
 
 def test_hide_until_unlocked_defaults_off_and_an_entry_overrides_the_block_default():
@@ -582,6 +591,98 @@ def test_hide_until_unlocked_must_be_a_bool_and_warns_where_it_never_acts():
         StaticPOIs(entries, hide_until_unlocked=True)
 
 
+def test_enforce_order_defaults_on_and_an_entry_overrides_the_block_default():
+    entries = [{"position": [2.0, 5.0], "coupling": 1, "order": 0},
+               {"position": [8.0, 5.0], "coupling": 1, "order": 1, "enforce_order": False},
+               {"position": [5.0, 8.0], "coupling": 1, "order": 1}]
+    _, state = make_env(entries=entries).reset(jax.random.PRNGKey(0))
+    np.testing.assert_array_equal(state.pois.enforce_order, [True, False, True])
+    assert state.pois.enforce_order.dtype == jnp.bool_
+    entries[1]["enforce_order"] = True
+    pois = StaticPOIs(entries, enforce_order=False)
+    np.testing.assert_array_equal(pois.enforce_order, [False, True, False])
+    with pytest.raises(ValueError, match="enforce_order must be true or false"):
+        make_env(entries=[{"position": [5.0, 5.0], "coupling": 1, "enforce_order": 0}])
+
+
+def test_an_order_that_is_not_enforced_locks_no_reward():
+    """The layout of test_a_locked_poi_pays_no_one_even_with_its_coupling_met,
+    with P1's order not enforced: P1 pays (difference rewards included) while
+    P0 still has budget, though its order is not reached."""
+    with pytest.warns(UserWarning, match="the order has no effect"):
+        env = make_env(n_agents=3, entries=[
+            {"position": [2.0, 5.0], "coupling": 1, "order": 0},
+            {"position": [8.0, 5.0], "coupling": 2, "order": 1, "enforce_order": False}])
+    state = state_at(env, [[8, 5], [8.5, 5], [5, 5]])
+    np.testing.assert_array_equal(np.asarray(order_reached(state.pois)), [True, False])
+    _, _, r, _, _, info = env.step(state, stay(3))
+    np.testing.assert_array_equal(np.asarray(info["poi_unlocked"]), [True, True])
+    np.testing.assert_array_equal(np.asarray(info["poi_active"]), [False, True])
+    np.testing.assert_allclose(float(info["task_reward"]), 0.05, rtol=1e-6)
+    np.testing.assert_allclose(r, [0.05, 0.05, 0.05], rtol=1e-6)
+    np.testing.assert_allclose(info["difference_rewards"], [0.05, 0.05, 0.0], rtol=1e-6)
+
+
+def test_an_order_that_is_not_enforced_and_hides_nothing_is_the_unordered_env():
+    """rover_4a_2poi_c2_ord with enforce_order false: scripted episodes,
+    rewards and observations equal rover_4a_2poi_c2's."""
+    with pytest.warns(UserWarning, match="the order has no effect"):
+        env = load_rover_env("rover_4a_2poi_c2_ord", ["env.pois.enforce_order=false"])
+    plain = load_rover_env("rover_4a_2poi_c2")
+    for key in jax.random.split(jax.random.PRNGKey(3), 3):
+        traj, plain_traj = scripted_episode(env, key), scripted_episode(plain, key)
+        np.testing.assert_array_equal(traj.positions, plain_traj.positions)
+        np.testing.assert_array_equal(traj.rewards, plain_traj.rewards)
+        np.testing.assert_array_equal(
+            observe_along(env, traj, traj.poi_remaining, key),
+            observe_along(plain, traj, traj.poi_remaining, key),
+        )
+
+
+def test_hide_until_unlocked_follows_the_order_when_it_is_not_enforced():
+    """The layout of test_a_flagged_poi_is_hidden_until_it_unlocks, P1 flagged:
+    enforced or not, the rovers sense the same at every budget, P1 appearing
+    once P0 is used up. Not enforced, P1 pays (and can be used up) while still
+    hidden."""
+    entries = [{"position": [3.0, 5.0], "coupling": 1, "order": 0},
+               {"position": [7.0, 5.0], "coupling": 1, "order": 1, "hide_until_unlocked": True}]
+    enforced = make_env(entries=entries)
+    entries[1]["enforce_order"] = False
+    free = make_env(entries=entries)
+    one = (1 - 2 / free.world_diagonal) / 2  # one POI at distance 2, of 2 POIs
+    for remaining in ([1.0, 1.0], [0.0, 1.0], [1.0, 0.0], [0.0, 0.0]):
+        obs = free.observe(state_at(free, [[5, 5], [1, 1]], remaining=remaining))
+        np.testing.assert_array_equal(
+            obs, enforced.observe(state_at(enforced, [[5, 5], [1, 1]], remaining=remaining))
+        )
+        p1_sensed = remaining[0] == 0.0  # P1 appears once P0 is used up
+        np.testing.assert_allclose(
+            obs[0, 8:], (np.eye(8)[4] + p1_sensed * np.eye(8)[0]) * one, rtol=1e-6
+        )
+    # Rover 0 on the hidden P1 while P0 has budget: paid only when not enforced.
+    for env, paid in ((enforced, 0.0), (free, 0.05)):
+        _, _, _, _, _, info = env.step(state_at(env, [[7, 5], [1, 1]]), stay(2))
+        np.testing.assert_allclose(np.asarray(info["poi_payout"]), [0.0, paid], rtol=1e-6)
+
+
+def test_enforce_order_warns_where_it_changes_nothing():
+    entries = [{"position": [2.0, 5.0], "coupling": 1, "order": 0},
+               {"position": [8.0, 5.0], "coupling": 1, "order": 1}]
+    # Unenforced on the lowest order only: no POI it could act on.
+    with pytest.warns(UserWarning, match=r"enforce_order is false on POIs \[0\]"):
+        make_env(entries=[{**entries[0], "enforce_order": False}, entries[1]])
+    # Unenforced on an unordered layout: there is no order to enforce.
+    with pytest.warns(UserWarning, match=r"enforce_order is false on POIs \[0, 1\]"):
+        StaticPOIs([{**e, "order": 0} for e in entries], enforce_order=False)
+    # Unenforced on every POI and nothing hidden: the order acts on nothing.
+    with pytest.warns(UserWarning, match=r"POIs \[1\] have an order above the lowest"):
+        StaticPOIs(entries, enforce_order=False)
+    # Unenforced but revealed in order: the intended use, no warning.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        StaticPOIs(entries, enforce_order=False, hide_until_unlocked=True)
+
+
 # ------------------------------------------------------------ pluggability
 
 
@@ -703,11 +804,20 @@ def test_a_poi_needing_more_rovers_than_exist_warns():
 
 
 def test_pois_ordered_after_one_that_can_never_pay_warn():
+    entries = [{"position": [5.0, 5.0], "coupling": 3, "order": 1},
+               {"position": [2.0, 2.0], "coupling": 1, "order": 2},
+               {"position": [8.0, 8.0], "coupling": 1, "order": 0}]
     with pytest.warns(UserWarning, match="can never pay"), \
-            pytest.warns(UserWarning, match=r"POIs \[1\] are ordered after"):
-        make_env(n_agents=2, entries=[{"position": [5.0, 5.0], "coupling": 3, "order": 1},
-                                      {"position": [2.0, 2.0], "coupling": 1, "order": 2},
-                                      {"position": [8.0, 8.0], "coupling": 1, "order": 0}])
+            pytest.warns(UserWarning, match=r"POIs \[1\] are ordered after .* never unlock"):
+        make_env(n_agents=2, entries=entries)
+    # Not enforced, P1 pays anyway; flagged, it is never sensed instead.
+    entries[1].update(enforce_order=False, hide_until_unlocked=True)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        make_env(n_agents=2, entries=entries)
+    messages = [str(w.message) for w in caught]
+    assert any("POIs [1] are ordered after" in m and "never sensed" in m for m in messages)
+    assert not any("never unlock" in m for m in messages)
 
 
 # ----------------------------------------------------------------- rollouts
@@ -792,8 +902,10 @@ def test_routed_rovers_never_leave_a_poi_that_still_needs_them():
 
 
 # Groups whose POIs need more coupled steps than the rovers can supply in one
-# episode: the floor below their plan's return (7.88 of 10 over 1000 seeds).
-ROUTE_PLAN_FLOORS = {"rover_6a_3poi_c3_implicit": 7.5}
+# episode: a floor below their plan's return over 1000 seeds
+# (rover_6a_3poi_c3_implicit 7.88 of 10; rover_6a_6poi_c3 4.31-4.44 of 6, its
+# inner POIs needing 100 coupled steps each).
+ROUTE_PLAN_FLOORS = {"rover_6a_3poi_c3_implicit": 7.5, "rover_6a_6poi_c3": 4.25}
 
 
 @pytest.mark.parametrize("variant", sorted(ROUTE_PLANS))

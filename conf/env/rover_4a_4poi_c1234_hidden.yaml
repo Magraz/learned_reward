@@ -1,0 +1,11 @@
+# @package _global_
+# Rover domain: 4 corner POIs with couplings 1, 2, 3 and 4 (4 rovers).
+# Only the coupling-4 POI needs the whole team; the rest can be worked in
+# parallel by sub-teams. Everything else is the default rover_2poi_c2.
+defaults:
+  - rover_4a_4poi_c1234_ord_hidden
+  - _self_
+
+env:
+  pois:
+    enforce_order: false

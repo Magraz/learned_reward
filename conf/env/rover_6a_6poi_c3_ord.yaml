@@ -4,16 +4,15 @@
 # team must split in halves and cover the ring in three rounds.
 # Everything else is the default rover_2poi_c2.
 defaults:
-  - rover_4a_2poi_c2
+  - rover_6a_6poi_c3
   - _self_
 
 env:
-  n_agents: 6
   pois:
     entries:
-      - {position: [8.5, 5.0], coupling: 3, order: 0}
-      - {position: [6.75, 8.03], coupling: 3, order: 1}
-      - {position: [3.25, 8.03], coupling: 3, order: 2}
-      - {position: [1.5, 5.0], coupling: 3, order: 3}
-      - {position: [3.25, 1.97], coupling: 3, order: 4}
-      - {position: [6.75, 1.97], coupling: 3, order: 5}
+      - {position: [7.0, 9.5], coupling: 3, rate: 0.01, order: 3}
+      - {position: [4.835, 5.75], coupling: 3, rate: 0.01, order: 4}
+      - {position: [9.165, 5.75], coupling: 3, rate: 0.01, order: 5}
+      - {position: [12.196, 10.0], coupling: 3, rate: 0.2, order: 0}
+      - {position: [1.804, 10.0], coupling: 3, rate: 0.2, order: 1}
+      - {position: [7.0, 1.0], coupling: 3, rate: 0.2, order: 2}

@@ -1,19 +1,30 @@
 # @package _global_
-# Rover domain: 6 rovers, 6 POIs of coupling 3 on a ring of radius 3.5 around
-# the arena centre (60 degrees apart). Two POIs can be worked at once, so the
-# team must split in halves and cover the ring in three rounds.
-# Everything else is the default rover_2poi_c2.
+# Rover domain: 6 rovers, 6 POIs of coupling 3 on two concentric rings around
+# the arena centre (7, 7), every POI worth 1.0:
+#   - inner ring, radius 2.5, at 90 / 210 / 330 degrees (POIs 0-2): slow, rate
+#     0.01, so 100 coupled steps each, as many as the episode has steps: an
+#     inner POI is never used up, and the episode always runs to the limit;
+#   - outer ring, radius 6.0, at 30 / 150 / 270 degrees (POIs 3-5): fast, rate
+#     0.2, so 5 coupled steps each.
+# The rings are offset by 60 degrees: neighbouring inner and outer POIs are
+# 5.22 apart, centre to centre, and no POI disc touches the spawn box.
+# The arena is 14 x 14 (not the default 10 x 10) so that the outer ring fits
+# with the spawn box still at the centre: the bottom POI's disc touches the
+# lower wall. Two POIs can be worked at once, so the team must split into two
+# teams of 3. Everything else is the default rover_4a_2poi_c2.
 defaults:
   - rover_4a_2poi_c2
   - _self_
 
 env:
   n_agents: 6
+  world_size: [14.0, 14.0]             # arena width, height
+  spawn_region: [6.0, 8.0, 6.0, 8.0]   # x_min, x_max, y_min, y_max (uniform)
   pois:
     entries:
-      - {position: [8.5, 5.0], coupling: 3}
-      - {position: [6.75, 8.03], coupling: 3}
-      - {position: [3.25, 8.03], coupling: 3}
-      - {position: [1.5, 5.0], coupling: 3}
-      - {position: [3.25, 1.97], coupling: 3}
-      - {position: [6.75, 1.97], coupling: 3}
+      - {position: [7.0, 9.5], coupling: 3, rate: 0.01}
+      - {position: [4.835, 5.75], coupling: 3, rate: 0.01}
+      - {position: [9.165, 5.75], coupling: 3, rate: 0.01}
+      - {position: [12.196, 10.0], coupling: 3, rate: 0.2}
+      - {position: [1.804, 10.0], coupling: 3, rate: 0.2}
+      - {position: [7.0, 1.0], coupling: 3, rate: 0.2}

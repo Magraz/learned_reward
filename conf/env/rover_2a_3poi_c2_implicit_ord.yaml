@@ -15,19 +15,12 @@
 # unique; fewer lets other orders fit, more leaves 0-1-2 too little time.
 # Everything the argument depends on is pinned here, not inherited.
 defaults:
-  - rover_4a_2poi_c2
+  - rover_2a_3poi_c2_implicit
   - _self_
 
 env:
-  n_agents: 4
-  max_steps: 100
-  world_size: [15.0, 15.0]
-  spawn_region: [3.42, 3.92, 4.35, 4.85]   # small, so every seed has the same best order
   pois:
-    type: static
-    radius: 1.0
-    rate: 0.1
     entries:
-      - {position: [1.0, 1.0], coupling: 3, value: 1.2}     # 12 steps, first
-      - {position: [7.75, 4.0], coupling: 3, value: 2.4}    # 24 steps, second (nearest)
-      - {position: [13.0, 13.0], coupling: 3, value: 2.4}   # 24 steps, last
+      - {position: [1.0, 1.0], coupling: 2, value: 1.2, order: 0}     # 12 steps, first
+      - {position: [7.75, 4.0], coupling: 2, value: 2.4, order: 1}    # 24 steps, second (nearest)
+      - {position: [13.0, 13.0], coupling: 2, value: 2.4, order: 2}   # 24 steps, last

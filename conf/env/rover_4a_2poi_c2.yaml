@@ -37,18 +37,25 @@ env:
     radius: 1.0                      # defaults for every entry below
     value: 1.0                       # total reward a POI can pay per episode
     rate: 0.1                       # paid per step while coupling is met
-    hide_until_unlocked: false       # true: hidden from the rovers while locked
+    # true: a POI pays only once every POI of a lower `order` is used up.
+    # false: `order` locks no reward and acts only through
+    # hide_until_unlocked (reveal POIs in order, score the unordered task).
+    enforce_order: true
+    hide_until_unlocked: false       # true: hidden until its order is reached
     # false: a used-up POI is still sensed, exactly like a live one.
     # true: hidden once used up (the rule of every run before 2026-11-04;
     # pass it to evaluate or view those runs). Not in the results path.
     hide_when_used_up: false
     # An entry may also set `order` (integer >= 0, default 0), its temporal
-    # coupling: it pays only once every POI of a lower order is used up.
-    # Equal orders (the default) leave the POIs free to be used in any order.
+    # coupling: its order is reached once every POI of a lower order is used
+    # up, and (with enforce_order) it pays only from then on. Equal orders
+    # (the default) leave the POIs free to be used in any order.
     # An entry may override `hide_until_unlocked`: a flagged POI is not sensed
-    # while it is locked. A POI of the lowest order is never locked, so the
-    # flag only acts on a POI with a higher order. An entry may also override
-    # `hide_when_used_up`.
+    # until its order is reached. A POI of the lowest order always has its
+    # order reached, so both order flags act only on a POI with a higher
+    # order. An entry may also override `enforce_order` and
+    # `hide_when_used_up`. None of these flags is in the results path: give a
+    # layout with a different setting its own env group.
     entries:
       - {position: [2.0, 8.0], coupling: 2}
       - {position: [8.0, 2.0], coupling: 2}
