@@ -84,9 +84,26 @@ renders; `mappo_jax` with `model=mlp` trains and renders.
   `rover_4a_4poi_c1234_ord` says the POIs "can be worked in parallel by
   sub-teams" and `rover_6a_6poi_c3_ord` that "two POIs can be worked at
   once", but their strict orders (0-1-2-3, 0-…-5) let only one POI pay at a
-  time. `rover_4a_4poi_c1234_ord` also senses globally where
-  `rover_4a_4poi_c1234` has `sensor_radius: 2.0`, so that pair differs in
-  sensing as well as in order.
+  time. Since commit `28bb856` (2026-11-05) `rover_4a_4poi_c1234_ord`
+  inherits `rover_4a_4poi_c1234` (`sensor_radius: 2.0`). Before, it restated
+  the layout from `rover_4a_2poi_c2` and sensed globally; its runs on disk
+  (trained 2026-11-05 before that commit) most likely did.
+- **`rover_16a_6poi_c844844_ord` and `_ord_hidden` sense globally** (found
+  2026-11-05): the `_ord` group restates its layout from `rover_4a_2poi_c2`
+  and lost `sensor_radius: 4.0` in commit `9211f61`, while
+  `rover_16a_6poi_c844844` senses within 4.0. Their runs on disk trained with
+  global sensing, so the pair differs in sensing as well as in order, and the
+  "Where hiding acts" note below (a 4.0 radius keeps locked POIs out of range)
+  does not hold for them.
+- **`rover_3a_3poi_c3_implicit_hidden` hides nothing** (found 2026-11-05). It
+  inherits `rover_3a_3poi_c3_implicit_ord` instead of `..._ord_hidden` (the
+  other three `_hidden` groups inherit `_ord_hidden`) and sets
+  `enforce_order: false`, so the order acts on nothing and the group is
+  `rover_3a_3poi_c3_implicit` (`StaticPOIs` warns at build). No runs on disk.
+- **No `reward_base` before 2026-11-05.** Runs trained before it existed have
+  no `reward_base` series. A finished run cannot be backfilled (only the last
+  model is saved; `evaluate=true` prints its final value). A resumed one reads
+  NaN up to its first new evaluation.
 - **Runs on disk that no longer match their yaml** (found 2026-11-05).
   `rover_6a_3poi_c3_implicit_ord_hidden` inherited `rover_6a_3poi_c3_implicit`
   instead of `..._ord`, so its runs trained the unordered env (their results
@@ -102,9 +119,11 @@ renders; `mappo_jax` with `model=mlp` trains and renders.
   40 runs on disk (`experiments/results/rover_6a_6poi_c3/{rmappo,mappo_mlp}{,_diffrew}`)
   trained the single ring. Move them before retraining, for the reason given
   above. `view=true` and `evaluate=true` on them now build the two-ring
-  layout. `rover_6a_6poi_c3_ord` and `_ord_hidden` restate their own POI
-  list, so they still use the single ring and are no longer ordered versions
-  of the unordered layout.
+  layout. Since commit `28bb856` (same day) `rover_6a_6poi_c3_ord` inherits
+  `rover_6a_6poi_c3`, so it and `_ord_hidden` are ordered versions of the
+  two-ring layout. Their runs on disk (trained earlier that day) most likely
+  used the single ring, and their `ROUTE_PLANS` entries (written for the
+  single ring) now fail their tests.
 
 - `conf/model/mlp.yaml` is missing again (found 2026-10-30, after the restore
   above; never committed), so `algorithm=mappo_jax model=mlp` fails with
@@ -372,7 +391,34 @@ Both stacks write the same stats pickles through `TrainingStatsTracker`
 `logs/training_stats_{checkpoint,finished}.pkl` with the same key set, so the
 notebook reads any of them. `reward` is the
 deterministic evaluation return; `total_steps`, `episodes`, timing series and
-the per-update losses ride alongside. `TrainingStatsTracker.to_dict()`
+the per-update losses ride alongside.
+
+`reward_base` (added 2026-11-05) is the same evaluation in the unmodified
+environment: one float per update, the length of `reward`, carried forward
+between evaluations the same way.
+- The unmodified environment is the run's own env with the POI order removed
+  (`environments.rover.config.base_env_config`): every POI's `order`,
+  `enforce_order` and `hide_until_unlocked` dropped, so nothing is locked or
+  hidden. Everything else stays as trained (layout, sensing, `max_steps`,
+  `hide_when_used_up`, reward mode). It is not the base group loaded by name,
+  so a pair that differs in more than the order (see Loose ends) still scores
+  the order alone.
+- `mappo_jax.run.make_base_env` builds it (`runner.base_env`) and checks that
+  the trained actor fits it (agents, observation and action widths). It is
+  `None` when the POIs share one order; `reward_base` is then a copy of
+  `reward`. The launch prints which (`reward_base: ...`).
+- `_base_eval_fn()` takes the stack's own `eval_fn` from
+  `_make_train(base_env)`, so both stacks evaluate their own policy there.
+  Both evaluations use the same key (the same spawns) and no extra split, so
+  training, `reward` and checkpoints are unchanged by it. `eval_time` covers
+  both; the progress line shows `Reward base:`.
+- Evaluation scores the team reward `G` in every reward mode, so the mode
+  needs no change.
+- For an `_ord` group without hiding, `reward_base ≥ reward` at every
+  evaluation: the observation does not depend on the order there, so the
+  rovers drive the same paths, and the unordered env pays a POI on a superset
+  of steps. With hiding there is no such bound: the policy sees every POI from
+  step 0, which it never saw in training. `TrainingStatsTracker.to_dict()`
 left-pads any series shorter than `total_steps` with NaN (left, because a late
 series' first element belongs to the iteration it first appeared in), so a
 metric added mid-run, or missing from the checkpoint a run resumed from, stays
@@ -411,8 +457,9 @@ is the rover domain.
   `n_steps * n_envs`; default 1048 × 32 = 33,536), restarts envs that finish
   mid-rollout (`trainer.restart_done_envs`), and bootstraps the final value.
   Then jitted `update_fn` and, every 10 updates plus the last, the deterministic
-  `eval_fn` (`n_eval_episodes`, default 32). `reward` carries the last
-  evaluation forward in between. ⚠ Because every rollout starts from a reset, a
+  `eval_fn` (`n_eval_episodes`, default 32), followed with the same key by
+  the base env's when there is one (`reward_base`, see Training stacks).
+  `reward` and `reward_base` carry the last evaluation forward in between. ⚠ Because every rollout starts from a reset, a
   rollout shorter than `max_steps` never trains on the back half of an episode.
 - **PPO update** (`mappo.ppo_update` = `prepare_advantages` →
   `flatten_samples` → `optimize_samples`): GAE on the scalar team reward with
@@ -455,7 +502,8 @@ is the rover domain.
   optimizer states, step counters and both random-number-generator (RNG)
   key chains (training and evaluation). Both are saved at every
   log point and at finish, so re-running with a larger `n_total_steps` extends
-  a finished run. `evaluate=true` prints the mean evaluation return.
+  a finished run. `evaluate=true` prints the mean evaluation return, and with
+  a base env also `Mean eval episode return, POI order removed`.
 - **`view=true`** is implemented for rover only (`_view_rover`; any other env
   raises `NotImplementedError`). It writes `logs/rover/arena.png`
   (`plot_arena`) and three `trajectory_seed<k>.png` (`plot_trajectory`) for
@@ -800,6 +848,13 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
     (not enforced, hidden). It also warns when `enforce_order: false` is set
     only on POIs of the lowest order (nothing to enforce), and when POIs above
     the lowest order neither enforce it nor hide (the order acts on nothing).
+  - **Scored with and without the order.** `reward` scores a run in its own
+    env, so an `_ord` group's `reward` is the ordered task and not comparable
+    to its unordered group's; `_ord` → `_ord_hidden` compares the same task
+    (hiding changes only the observation); a `_hidden` group
+    (`enforce_order: false`) scores the unordered task. `reward_base` scores
+    every one of them with the order removed, i.e. the order lock and hiding
+    as training-only biases (see Training stacks).
   - **Hiding locked POIs (`hide_until_unlocked`, added 2026-11-03).** A POI
     with `hide_until_unlocked: true` is not sensed by the rovers until its
     order is reached. It appears on the step it unlocks. With
@@ -1126,8 +1181,17 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   of the rover domain and nothing imports it. It is the only remaining user of
   the `jaxmarl` package.
 - **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (82 tests,
-  CPU; on 2026-11-05, 23 fail on stale variant names, see Loose ends, and 1
-  because `ROUTE_PLANS` names the deleted `rover_4a_3poi_c3_implicit`).
+  CPU; on 2026-11-05, 23 fail on stale variant names, see Loose ends, 1
+  because `ROUTE_PLANS` names the deleted `rover_4a_3poi_c3_implicit`, and 2
+  because the `rover_6a_6poi_c3_ord` plans were written for the single ring).
+  `algorithms/tests/test_reward_base.py` (12 tests, CPU, all pass): the base
+  config is `None` for one-order layouts; for `rover_4a_2poi_c2_ord`,
+  `_ord_hidden` and `rover_4a_4poi_c1234_hidden` it builds, without warnings,
+  an env whose reset equals the unordered group's; it keeps the run's own
+  sensing and leaves its input unchanged; a resumed run without `reward_base`
+  is NaN-padded to full length; and both stacks train end to end (3 updates)
+  writing `reward_base` the length of `reward`, equal to it on
+  `rover_4a_2poi_c2` and ≥ it on `rover_4a_2poi_c2_ord`.
   `enforce_order`: default on, per-entry override, non-boolean rejected; not
   enforced, a POI pays (difference rewards included) before its order is
   reached; not enforced and not hidden, `rover_4a_2poi_c2_ord` equals

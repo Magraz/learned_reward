@@ -17,7 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax.serialization import from_bytes, msgpack_restore, to_bytes
 
-from algorithms.mappo_jax.run import MAPPO_JAX_Runner, make_env
+from algorithms.mappo_jax.run import MAPPO_JAX_Runner, make_base_env, make_env
 from algorithms.mappo_jax.trainer import global_state_dim
 from algorithms.rmappo_jax.mappo import (
     RMAPPOTrainState,
@@ -101,6 +101,7 @@ class RMAPPO_JAX_Runner(MAPPO_JAX_Runner):
         # configuration leaves nothing behind.
         self.env = make_env(env_config)
         validate(self.config, self.env)
+        self.base_env = make_base_env(env_config, self.env)
         self._init_trial(
             device, batch_dir, trials_dir, trial_id, checkpoint,
             self.params.random_seeds,
@@ -133,9 +134,10 @@ class RMAPPO_JAX_Runner(MAPPO_JAX_Runner):
             f"centralized input: gs_dim={global_state_dim(self.env)} "
             f"(env hook: {hasattr(self.env, 'global_state')})"
         )
+        self._print_base_env()
 
-    def _make_train(self):
-        return make_train(self.config, self.env)
+    def _make_train(self, env=None):
+        return make_train(self.config, self.env if env is None else env)
 
     def _eval_every(self) -> int:
         return self.config.eval_interval

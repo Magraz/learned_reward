@@ -15,6 +15,7 @@ class TrainingStatsTracker:
             self.training_stats = defaultdict(list)
             self.training_stats["total_steps"] = []
             self.training_stats["reward"] = []
+            self.training_stats["reward_base"] = []
             self.training_stats["action_distribution"] = []
             self.training_stats["episodes"] = []
             self.training_stats["training_time"] = []
@@ -57,6 +58,7 @@ class TrainingStatsTracker:
         steps_completed: int,
         episodes_completed: int,
         reward: float,
+        reward_base: float,
         collection_time: float,
         update_time: float,
         eval_time: float,
@@ -67,6 +69,9 @@ class TrainingStatsTracker:
 
         self.training_stats["total_steps"].append(steps_completed)
         self.training_stats["reward"].append(reward)
+        # The same evaluation in the unmodified env (the runners' base env, POI
+        # order removed); a copy of `reward` when the env has no base env.
+        self.training_stats["reward_base"].append(reward_base)
         # Only recorded for discrete-action runs (e.g. the hierarchical skill
         # selector); left empty for continuous envs to keep the series clean.
         if action_distribution is not None:
@@ -83,6 +88,9 @@ class TrainingStatsTracker:
         self.training_stats = defaultdict(list)
         self.training_stats["total_steps"] = stats.get("total_steps", [])
         self.training_stats["reward"] = stats.get("reward", [])
+        # Absent from runs before reward_base existed: starts empty, and to_dict
+        # left-pads it with NaN up to the length of total_steps.
+        self.training_stats["reward_base"] = stats.get("reward_base", [])
         self.training_stats["action_distribution"] = stats.get(
             "action_distribution", []
         )

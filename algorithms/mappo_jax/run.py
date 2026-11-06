@@ -100,6 +100,32 @@ def make_env(env_config: dict):
     return env
 
 
+def make_base_env(env_config: dict, env):
+    """The unmodified env that `reward_base` is evaluated in, or `None`.
+
+    `None` when `env_config` has nothing to remove; `reward_base` then copies
+    `reward`. Rover: the same env with the POI order removed
+    (`environments.rover.config.base_env_config`). Any other environment has no
+    base env. The trained actor must fit both envs, so `env` (the training env)
+    and the base env must agree on agents, observation and action widths.
+    """
+    if env_config.get("environment") != EnvironmentEnum.ROVER:
+        return None
+    from environments.rover.config import base_env_config
+
+    base_config = base_env_config(env_config)
+    if base_config is None:
+        return None
+    base_env = make_env(base_config)
+    for attr in ("n_agents", "observation_dim", "action_dim"):
+        if getattr(base_env, attr) != getattr(env, attr):
+            raise ValueError(
+                f"the base env's {attr} ({getattr(base_env, attr)}) differs from "
+                f"the training env's ({getattr(env, attr)})"
+            )
+    return base_env
+
+
 class MAPPO_JAX_Runner:
     def __init__(
         self,
@@ -121,6 +147,7 @@ class MAPPO_JAX_Runner:
         )
 
         self.env = make_env(env_config)
+        self.base_env = make_base_env(env_config, self.env)
         environment = env_config.get("environment")
 
         # A per-agent reward switches the critic to a per-agent value head and
@@ -166,6 +193,14 @@ class MAPPO_JAX_Runner:
             f"  centralized input: gs_dim={global_state_dim(self.env)} "
             f"(env hook: {hasattr(self.env, 'global_state')})"
         )
+        self._print_base_env()
+
+    def _print_base_env(self):
+        """One launch line saying what `reward_base` evaluates (both runners)."""
+        if self.base_env is None:
+            print("  reward_base: copy of reward (no POI order to remove)")
+        else:
+            print("  reward_base: evaluated with the POI order removed")
 
     def _init_trial(
         self, device, batch_dir, trials_dir, trial_id, checkpoint, random_seeds
@@ -197,14 +232,26 @@ class MAPPO_JAX_Runner:
         set_seeds(random_seed)
         self.rng_seed = random_seed
 
-    def _make_train(self):
-        """`(init_fn, collect_fn, update_fn, eval_fn, num_updates)` for this run.
+    def _make_train(self, env=None):
+        """`(init_fn, collect_fn, update_fn, eval_fn, num_updates)` for this run,
+        over `env` (default the training env).
 
         The hook a subclassed runner overrides to reuse `train()` / `evaluate()`
         with its own jitted functions. `train()` treats the trajectory and bootstrap
         value opaquely, so any structure works as long as `update_fn` accepts it.
         """
-        return make_train(self.config, self.env)
+        return make_train(self.config, self.env if env is None else env)
+
+    def _base_eval_fn(self):
+        """`eval_fn(train_state, rng)` over the base env, or `None` without one.
+
+        Built through `_make_train` so each stack evaluates with its own policy
+        (feedforward or GRU). The base env's collect and update functions are
+        never called, so jit never compiles them.
+        """
+        if self.base_env is None:
+            return None
+        return self._make_train(self.base_env)[3]
 
     def _steps_per_update(self) -> int:
         """Env steps one update consumes from `n_total_steps`: the logged
@@ -227,6 +274,7 @@ class MAPPO_JAX_Runner:
         from algorithms.mappo_jax.stats_tracker import TrainingStatsTracker
 
         init_fn, collect_fn, update_fn, eval_fn, num_updates = self._make_train()
+        base_eval_fn = self._base_eval_fn()
         steps_per_update = self._steps_per_update()
         total_steps = self.config.n_total_steps
         log_every = 10e3
@@ -277,6 +325,13 @@ class MAPPO_JAX_Runner:
             if checkpoint_loaded and stats_tracker.training_stats["reward"]
             else 0.0
         )
+        # `reward_base` is carried forward the same way. A checkpoint written
+        # before it existed has none, so it reads NaN until the next eval.
+        eval_reward_base = (
+            stats_tracker.training_stats["reward_base"][-1]
+            if checkpoint_loaded and stats_tracker.training_stats["reward_base"]
+            else float("nan")
+        )
 
         for update in range(start_update, num_updates):
             collection_start = time.time()
@@ -296,7 +351,15 @@ class MAPPO_JAX_Runner:
                 eval_start = time.time()
                 eval_rng, eval_key = jax.random.split(eval_rng)
                 eval_reward = float(eval_fn(runner_state.train_state, eval_key))
+                # The same key, so both evals start from the same spawns, and no
+                # extra split, so the eval RNG chain is unchanged.
+                if base_eval_fn is not None:
+                    eval_reward_base = float(
+                        base_eval_fn(runner_state.train_state, eval_key)
+                    )
                 eval_time = time.time() - eval_start
+            if base_eval_fn is None:
+                eval_reward_base = eval_reward
 
             steps_completed += steps_per_update
             episodes_completed += int(rollout_stats["episode_count"])
@@ -308,6 +371,7 @@ class MAPPO_JAX_Runner:
                 steps_completed=steps_completed,
                 episodes_completed=episodes_completed,
                 reward=eval_reward,
+                reward_base=eval_reward_base,
                 collection_time=collection_time,
                 update_time=update_time,
                 eval_time=eval_time,
@@ -321,6 +385,7 @@ class MAPPO_JAX_Runner:
                     f"({steps_completed/total_steps*100:.1f}%) | "
                     f"Episodes: {episodes_completed} | "
                     f"Reward: {eval_reward:.2f} | "
+                    f"Reward base: {eval_reward_base:.2f} | "
                     f"Time: {elapsed_time:.1f}s | "
                     f"FPS: {steps_per_second:.1f} | "
                     f"Collection: {collection_time:.2f}s | "
@@ -481,6 +546,11 @@ class MAPPO_JAX_Runner:
         """Deterministic evaluation of the saved policy (PolicyEvaluator parity)."""
         train_state = self._load_train_state()
         _, _, _, eval_fn, _ = self._make_train()
-        reward = float(eval_fn(train_state, jax.random.PRNGKey(self.rng_seed + 1)))
+        key = jax.random.PRNGKey(self.rng_seed + 1)
+        reward = float(eval_fn(train_state, key))
         print(f"Mean eval episode return: {reward:.2f}")
+        base_eval_fn = self._base_eval_fn()
+        if base_eval_fn is not None:
+            reward_base = float(base_eval_fn(train_state, key))
+            print(f"Mean eval episode return, POI order removed: {reward_base:.2f}")
         return reward

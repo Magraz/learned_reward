@@ -12,6 +12,7 @@ from here::
 block, and a misindented key would otherwise be silently ignored.
 """
 
+import copy
 from pathlib import Path
 
 from environments.rover.base import BaseRoverEnv
@@ -88,6 +89,40 @@ def make_rover_env(env_cfg):
         **kwargs,
         **dynamics,
     )
+
+
+# POI keys that make a layout ordered: the order itself and the two flags that
+# act through it. `base_env_config` removes all three.
+_ORDER_KEYS = ("order", "enforce_order", "hide_until_unlocked")
+
+
+def base_env_config(env_cfg):
+    """The ``env:`` block of ``env_cfg`` with the POI order removed, or ``None``.
+
+    This is the unmodified environment the runners evaluate a trained policy in
+    as ``reward_base``. Every POI entry loses ``order``, ``enforce_order`` and
+    ``hide_until_unlocked``, and the ``pois`` block loses its defaults for the
+    two flags, so ``StaticPOIs``' defaults apply: every order 0, nothing hidden.
+    With a single order neither flag can act: any POI whose coupling is met
+    pays, and every POI is sensed. Every other key is kept as trained (layout,
+    sensing, ``max_steps``, ``hide_when_used_up``, ``reward``).
+
+    Returns ``None`` when the POIs already share one order: there is nothing to
+    remove, and the env is its own unmodified environment. Never mutates
+    ``env_cfg``.
+    """
+    entries = env_cfg["pois"]["entries"]
+    if len({entry.get("order", 0) for entry in entries}) <= 1:
+        return None
+    base = copy.deepcopy(dict(env_cfg))
+    pois = base["pois"]
+    for key in ("enforce_order", "hide_until_unlocked"):
+        pois.pop(key, None)
+    pois["entries"] = [
+        {k: v for k, v in entry.items() if k not in _ORDER_KEYS}
+        for entry in pois["entries"]
+    ]
+    return base
 
 
 def list_variants():
