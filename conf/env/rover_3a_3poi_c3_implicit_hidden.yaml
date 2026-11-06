@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - rover_3a_3poi_c3_implicit_ord
+  - rover_3a_3poi_c3_implicit_ord_hidden
   - _self_
 
 env:
