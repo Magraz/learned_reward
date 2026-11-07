@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - rover_1a_4poi_c1_implicit_ord
+  - _self_
+
+env:
+  pois:
+    enforce_order: false

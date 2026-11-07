@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - rover_1a_4poi_c1_implicit
+  - _self_
+
+env:
+  pois:
+    entries:
+      - {position: [9.0, 1.5], coupling: 1, value: 1.2, order: 1}    # 12 steps, second
+      - {position: [6.0, 4.5], coupling: 1, value: 0.9, order: 0}    # 9 steps, first (nearest)
+      - {position: [12.0, 7.5], coupling: 1, value: 1.8, order: 2}   # 18 steps, third
+      - {position: [3.0, 12.0], coupling: 1, value: 2.4, order: 3}   # 24 steps, last

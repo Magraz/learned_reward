@@ -1,0 +1,47 @@
+# @package _global_
+# Rover domain: a visiting order set by layout and values alone (no `order`
+# key). 1 rover, 4 POIs of coupling 1, 15x15 arena. Collecting every POI's
+# value (6.3) within the 100 steps is possible only by using the POIs up in
+# the order 1 -> 0 -> 2 -> 3:
+#   P1, the POI nearest the spawn, first;
+#   P0, the lower-right POI, second;
+#   P2, the right POI, third;
+#   P3, the far upper-left POI, last.
+# Why: one rover works one POI at a time, so using everything up takes
+# 9 + 12 + 18 + 24 = 63 paying steps (value / rate) in every order, leaving
+# 37 steps of travel. Order 1-0-2-3 needs 33-37 of them (scripted route
+# policy); every other order needs at least 38, for any policy (bound on
+# 1000 spawn seeds: straight-line travel between disc edges, the entering
+# step counted as paying, a heading-limited start, and return trips through
+# discs already visited allowed).
+# The values set only that budget; with one rover they cannot set the order,
+# which is the shortest tour. The budget is tight: on its worst seeds 1-0-2-3
+# finishes on step 100. 64 paying steps leave it too little time on 14 of
+# 1000 seeds; at 62 the bound no longer rules out a second order on 457.
+# The margin also needs the small spawn box: in a 3x3 box the best order's
+# travel varies by more than its lead over the second, and at most 575 of
+# 1000 seeds had a unique order under any budget.
+# Every POI pays the same rate, so a paying step is worth 0.1 wherever it is
+# taken; the values grow along the order, so the far last POI is worth most.
+# Everything the argument depends on is pinned here, not inherited.
+defaults:
+  - rover_4a_2poi_c2
+  - _self_
+
+env:
+  n_agents: 1
+  max_steps: 100
+  world_size: [15.0, 15.0]
+  spawn_region: [2.95, 3.45, 1.95, 2.45]   # small, so every seed has the same unique order
+  dynamics:
+    max_speed: 0.5
+    max_turn: 0.7853981633974483
+  pois:
+    type: static
+    radius: 1.0
+    rate: 0.1
+    entries:
+      - {position: [9.0, 1.5], coupling: 1, value: 1.2}    # 12 steps, second
+      - {position: [6.0, 4.5], coupling: 1, value: 0.9}    # 9 steps, first (nearest)
+      - {position: [12.0, 7.5], coupling: 1, value: 1.8}   # 18 steps, third
+      - {position: [3.0, 12.0], coupling: 1, value: 2.4}   # 24 steps, last

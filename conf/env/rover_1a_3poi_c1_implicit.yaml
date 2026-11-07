@@ -1,0 +1,21 @@
+# @package _global_
+# Rover domain: the one-rover version of rover_3a_3poi_c3_implicit. Same
+# arena, spawn and POI layout; 1 rover and every coupling 1, so the task keeps
+# the visiting order and drops the coordination.
+# The POIs need 100, 150 and 60 coupled steps (value / rate), so in 100 steps
+# the rover uses up at most POI 2 (6.0 in 60 steps) and then sits on POI 1
+# (0.02 per step) or POI 0 (0.01 per step). POI 0, the largest disc and the
+# nearest to the spawn, is the decoy.
+# Inherits the arena and spawn from the 3-rover group; `entries` replaces the
+# whole list, so the layout is restated here.
+defaults:
+  - rover_3a_3poi_c3_implicit
+  - _self_
+
+env:
+  n_agents: 1
+  pois:
+    entries:
+      - {position: [5.0, 4.0], coupling: 1, radius: 1.25, value: 1.0, rate: 0.01}
+      - {position: [2.0, 6.0], coupling: 1, radius: 0.75, value: 3.0, rate: 0.02}
+      - {position: [9.0, 9.0], coupling: 1, radius: 0.5, value: 6.0, rate: 0.1}

@@ -18,6 +18,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from environments.rover.base import wrap_angle
+from environments.rover.config import list_variants
 from environments.rover.pois import unlocked
 from environments.rover.rollout import rollout, rollout_reset
 
@@ -50,10 +51,28 @@ ROUTE_PLANS = {
     "rover_4a_2poi_c2_implicit": _TWO_PAIRS,  # 30 and 60 coupled steps, in parallel
     "rover_16a_2poi_c8": _TWO_EIGHTS,
     "rover_16a_2poi_c8_ord": _TWO_EIGHTS,
-    # One team (the coupling is more than half the rovers): only the order
-    # 0 -> 1 -> 2 uses every POI up within the episode (see the group's yaml).
+    # One team (the coupling is the whole team): only the order 0 -> 1 -> 2
+    # uses every POI up within the episode (see the group's yaml). The `_ord`
+    # group's order is the same 0-1-2, so the lock never binds.
     "rover_2a_3poi_c2_implicit": (((0, 1, 2), 2),),
-    "rover_4a_3poi_c3_implicit": (((0, 1, 2), 4),),
+    "rover_2a_3poi_c2_implicit_ord": (((0, 1, 2), 2),),
+    # The same layout with one rover of coupling 1: the same route, without
+    # waiting for a teammate.
+    "rover_1a_3poi_c1_implicit012": (((0, 1, 2), 1),),
+    "rover_1a_3poi_c1_implicit012_ord": (((0, 1, 2), 1),),
+    # One team of 3. POIs 0 and 1 need 100 and 150 coupled steps, so neither is
+    # ever used up and the team stays on the second POI of its route. POI 2
+    # first (6.0 in 60 steps), then POI 1 (0.02 per step) beats POI 0 (0.01).
+    # The `_ord` group's order (2, then 1, then 0) is this route.
+    "rover_3a_3poi_c3_implicit": (((2, 1, 0), 3),),
+    "rover_3a_3poi_c3_implicit_ord": (((2, 1, 0), 3),),
+    # The same layout with one rover of coupling 1: the same route, without
+    # waiting for teammates.
+    "rover_1a_3poi_c1_implicit": (((2, 1, 0), 1),),
+    "rover_1a_3poi_c1_implicit_ord": (((2, 1, 0), 1),),
+    # One rover, 63 paying steps in every order, 37 left for travel: only the
+    # shortest tour, 1 -> 0 -> 2 -> 3, fits (see the group's yaml).
+    "rover_1a_4poi_c1_implicit": (((1, 0, 2, 3), 1),),
     # The coupling-4 corner needs every rover, so it goes first. Then three
     # rovers take the coupling-3 corner and one the coupling-1 corner, both next
     # to it; then two of the three take the coupling-2 corner, next to both.
@@ -73,23 +92,37 @@ ROUTE_PLANS = {
     # outer POIs between the teams scores slightly less, the whole team of 6
     # together much less (see CLAUDE.md).
     "rover_6a_6poi_c3": (((2, 0), 3), ((3, 4, 5, 1), 3)),
-    # Strict order 0-...-5: the teams alternate, each driving to its next POI
-    # (two along the ring) while the other team works the one in between.
-    "rover_6a_6poi_c3_ord": (((0, 2, 4), 3), ((1, 3, 5), 3)),
+    # Two rings, ordered outer first: POI 3, 4, 5 (orders 0-2), then inner POI 0
+    # (order 3). POI 0 is never used up, so inner POIs 1 and 2 (orders 4, 5)
+    # never unlock and the maximum is 3 plus POI 0's 0.01 per step. One team
+    # uses up POI 3; the other waits at POI 4 and works it the step POI 3 runs
+    # out, then parks on POI 0 (locked until POI 5 is used up) for the rest of
+    # the episode; the first team drives from POI 3 to POI 5. Routes end on a
+    # POI that never pays or is never reached (2 and 1) because plan_routes
+    # needs every POI on some route. Best of all 1944 whole-team and two-team
+    # plans (16 seeds), with its equivalent variants.
+    "rover_6a_6poi_c3_ord": (((3, 5, 2), 3), ((4, 0, 1), 3)),
     # Under `_ord` the left corners (order 2) wait for the right ones (order 1).
     "rover_16a_6poi_c844844": _C844844,
     "rover_16a_6poi_c844844_ord": _C844844,
     # Cannot collect the maximum 10: the POIs need 100, 150 and 60 coupled
     # steps, and two teams of 3 supply at most 200 in 100 steps. One team takes
     # POI 2 (0.1 per step), then POI 0; the other works POI 1 (0.02 per step)
-    # for the whole episode.
+    # for the whole episode. Under `_ord` (POI 2, then 1, then 0) the same plan
+    # is best (6.44 of 10, 18 plans searched): the second team waits at POI 1
+    # until POI 2 is used up, and POI 0 never unlocks (POI 1 is never used up).
     "rover_6a_3poi_c3_implicit": (((2, 0), 3), ((1,), 3)),
+    "rover_6a_3poi_c3_implicit_ord": (((2, 0), 3), ((1,), 3)),
 }
 # Hiding changes only what the rovers sense, and these rovers read the true
-# state, so each `_ord_hidden` group uses its `_ord` group's plan.
-ROUTE_PLANS.update(
-    {f"{name}_hidden": plan for name, plan in list(ROUTE_PLANS.items()) if name.endswith("_ord")}
-)
+# state, so a group `<name>_hidden` uses `<name>`'s plan: an `_ord_hidden` group
+# its `_ord` group's (same task), and a plain `_hidden` group
+# (`enforce_order: false`, so the order locks nothing) its unordered group's.
+ROUTE_PLANS.update({
+    variant: ROUTE_PLANS[variant.removesuffix("_hidden")]
+    for variant in list_variants()
+    if variant.endswith("_hidden") and variant.removesuffix("_hidden") in ROUTE_PLANS
+})
 
 
 def random_policy(params, key, obs, state):

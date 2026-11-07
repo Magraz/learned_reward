@@ -1,8 +1,10 @@
 # @package _global_
-# Rover domain: 6 rovers, 6 POIs of coupling 3 on a ring of radius 3.5 around
-# the arena centre (60 degrees apart). Two POIs can be worked at once, so the
-# team must split in halves and cover the ring in three rounds.
-# Everything else is the default rover_2poi_c2.
+# Rover domain: rover_6a_6poi_c3 (two rings around (7, 7), 6 rovers, coupling
+# 3) with a strict order: the fast outer POIs first (3, 4, 5 = orders 0-2),
+# then the slow inner ones (0, 1, 2 = orders 3-5). One POI pays at a time.
+# Inner POI 0 needs 100 coupled steps and is never used up, so POIs 1 and 2
+# never unlock: the most a team can collect is 3 plus POI 0's 0.01 per step
+# (the scripted plan in ROUTE_PLANS collects 3.59-3.66).
 defaults:
   - rover_6a_6poi_c3
   - _self_

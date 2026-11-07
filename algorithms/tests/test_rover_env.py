@@ -747,8 +747,8 @@ def test_a_reward_model_without_one_reward_per_rover_is_rejected():
 
 def test_every_rover_variant_composes_and_builds():
     variants = list_variants()
-    assert "rover_2poi_c2" in variants and len(variants) >= 3
-    default = load_env_config("rover_2poi_c2")
+    assert "rover_4a_2poi_c2" in variants and len(variants) >= 3
+    default = load_env_config("rover_4a_2poi_c2")
     for variant in variants:
         cfg = load_env_config(variant)
         env = make_rover_env(cfg)
@@ -902,10 +902,23 @@ def test_routed_rovers_never_leave_a_poi_that_still_needs_them():
 
 
 # Groups whose POIs need more coupled steps than the rovers can supply in one
-# episode: a floor below their plan's return over 1000 seeds
-# (rover_6a_3poi_c3_implicit 7.88 of 10; rover_6a_6poi_c3 4.31-4.44 of 6, its
-# inner POIs needing 100 coupled steps each).
-ROUTE_PLAN_FLOORS = {"rover_6a_3poi_c3_implicit": 7.5, "rover_6a_6poi_c3": 4.25}
+# episode: a floor below their plan's return over 1000 seeds (range in the
+# comment). A `<name>_hidden` group uses `<name>`'s floor, as it uses its plan.
+ROUTE_PLAN_FLOORS = {
+    "rover_3a_3poi_c3_implicit": 6.0,  # 6.08-6.24 of 10
+    "rover_3a_3poi_c3_implicit_ord": 6.0,  # 6.08-6.24
+    "rover_1a_3poi_c1_implicit": 6.0,  # 6.13-6.28 of 10
+    "rover_1a_3poi_c1_implicit_ord": 6.0,  # 6.08-6.28
+    "rover_6a_3poi_c3_implicit": 7.5,  # 7.79-7.98 of 10
+    "rover_6a_3poi_c3_implicit_ord": 6.25,  # 6.36-6.52
+    "rover_6a_6poi_c3": 4.25,  # 4.31-4.44 of 6, inner POIs need 100 coupled steps
+    "rover_6a_6poi_c3_ord": 3.5,  # 3.59-3.66, inner POIs 1 and 2 never unlock
+}
+
+
+def test_every_rover_group_has_a_route_plan():
+    missing = sorted(set(list_variants()) - set(ROUTE_PLANS))
+    assert not missing, f"no ROUTE_PLANS entry for {missing}"
 
 
 @pytest.mark.parametrize("variant", sorted(ROUTE_PLANS))
@@ -917,8 +930,9 @@ def test_every_route_plan_names_a_current_group_and_solves_it(variant):
     keys = jax.vmap(jax.random.PRNGKey)(jnp.arange(2))
     traj, routes = planned_rollouts(env, keys, ROUTE_PLANS[variant])
     returns = np.asarray(traj.episode_return)
-    if variant in ROUTE_PLAN_FLOORS:
-        assert np.all(returns >= ROUTE_PLAN_FLOORS[variant])
+    floor = ROUTE_PLAN_FLOORS.get(variant.removesuffix("_hidden"))
+    if floor is not None:
+        assert np.all(returns >= floor)
     else:
         np.testing.assert_allclose(returns, float(env.pois.value.sum()), atol=1e-5)
         assert np.all(solve_steps(traj)[0] >= 0)

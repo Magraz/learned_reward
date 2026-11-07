@@ -1,0 +1,14 @@
+# @package _global_
+# rover_1a_3poi_c1_implicit012 with its only full-collection order made
+# explicit: POI 0 first, then POI 1, then POI 2. The lock never delays that
+# route; it only stops a POI from paying when the rover reaches it early.
+defaults:
+  - rover_1a_3poi_c1_implicit012
+  - _self_
+
+env:
+  pois:
+    entries:
+      - {position: [1.0, 1.0], coupling: 1, value: 1.2, order: 0}     # 12 steps, first
+      - {position: [7.75, 4.0], coupling: 1, value: 2.4, order: 1}    # 24 steps, second (nearest)
+      - {position: [13.0, 13.0], coupling: 1, value: 2.4, order: 2}   # 24 steps, last

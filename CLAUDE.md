@@ -82,9 +82,9 @@ renders; `mappo_jax` with `model=mlp` trains and renders.
   moved to the current names on 2026-11-04.
 - **`_ord` comments copied from the unordered groups** (found 2026-11-03):
   `rover_4a_4poi_c1234_ord` says the POIs "can be worked in parallel by
-  sub-teams" and `rover_6a_6poi_c3_ord` that "two POIs can be worked at
-  once", but their strict orders (0-1-2-3, 0-…-5) let only one POI pay at a
-  time. Since commit `28bb856` (2026-11-05) `rover_4a_4poi_c1234_ord`
+  sub-teams", but its strict order (0-1-2-3) lets only one POI pay at a
+  time. (`rover_6a_6poi_c3_ord`'s header, which described the old single
+  ring, was rewritten on 2026-11-06.) Since commit `28bb856` (2026-11-05) `rover_4a_4poi_c1234_ord`
   inherits `rover_4a_4poi_c1234` (`sensor_radius: 2.0`). Before, it restated
   the layout from `rover_4a_2poi_c2` and sensed globally; its runs on disk
   (trained 2026-11-05 before that commit) most likely did.
@@ -95,11 +95,6 @@ renders; `mappo_jax` with `model=mlp` trains and renders.
   global sensing, so the pair differs in sensing as well as in order, and the
   "Where hiding acts" note below (a 4.0 radius keeps locked POIs out of range)
   does not hold for them.
-- **`rover_3a_3poi_c3_implicit_hidden` hides nothing** (found 2026-11-05). It
-  inherits `rover_3a_3poi_c3_implicit_ord` instead of `..._ord_hidden` (the
-  other three `_hidden` groups inherit `_ord_hidden`) and sets
-  `enforce_order: false`, so the order acts on nothing and the group is
-  `rover_3a_3poi_c3_implicit` (`StaticPOIs` warns at build). No runs on disk.
 - **No `reward_base` before 2026-11-05.** Runs trained before it existed have
   no `reward_base` series. A finished run cannot be backfilled (only the last
   model is saved; `evaluate=true` prints its final value). A resumed one reads
@@ -122,8 +117,8 @@ renders; `mappo_jax` with `model=mlp` trains and renders.
   layout. Since commit `28bb856` (same day) `rover_6a_6poi_c3_ord` inherits
   `rover_6a_6poi_c3`, so it and `_ord_hidden` are ordered versions of the
   two-ring layout. Their runs on disk (trained earlier that day) most likely
-  used the single ring, and their `ROUTE_PLANS` entries (written for the
-  single ring) now fail their tests.
+  used the single ring. Their `ROUTE_PLANS` entry was rewritten for the two
+  rings on 2026-11-06.
 
 - `conf/model/mlp.yaml` is missing again (found 2026-10-30, after the restore
   above; never committed), so `algorithm=mappo_jax model=mlp` fails with
@@ -1011,8 +1006,8 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
     only set this budget; the order itself is a shortest-path question. The
     nearest POI can come second but never uniquely last (starting there and
     reversing the path is never longer).
-  - Checked over 1000 spawn seeds: the scripted route 0-1-2 (`ROUTE_PLANS`
-    has it; `scripted_steps --variant rover_4a_3poi_c3_implicit`) collects
+  - Checked over 1000 spawn seeds: the scripted route 0-1-2 (in
+    `ROUTE_PLANS` until the group's yaml was deleted; removed 2026-11-06) collects
     6.0 on every seed, in 93-98 steps, with 33-38 non-paying steps. A lower
     bound for any policy (heading-limited entry, then straight-line travel
     between disc edges, over every walk that uses the POIs up in that order)
@@ -1074,10 +1069,27 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   hand-written team plan per rover env group, each the best of the candidates
   tried (whole-team sequences, splits, visiting orders; 64 seeds each), not
   proven optimal. The comments in `policies.py` give each plan's reasoning.
-  Each `_ord_hidden` group reuses its `_ord` group's plan: the scripted rovers
-  read the true state, so hiding changes nothing for them. A rover whose
-  target is locked parks there and waits. A test runs every plan, so a
-  renamed or deleted group must take its plan along.
+  Every group `<name>_hidden` with a `conf/env` file reuses `<name>`'s plan
+  (the dictionary is filled from `list_variants()` at import): an
+  `_ord_hidden` group its `_ord` group's, a plain `_hidden` group
+  (`enforce_order: false`) its unordered group's, since its order locks
+  nothing. The scripted rovers read the true state, so hiding changes nothing
+  for them; each `_hidden` group scores exactly its parent's numbers. A rover
+  whose target is locked parks there and waits. Tests check that every
+  `conf/env/rover_*.yaml` has a plan (39 of 41 on 2026-11-06: `rover_1a_4poi_c1_implicit_ord` and
+  `_ord_hidden` have none yet), that every plan
+  names a current group, and run every plan, so a new, renamed or deleted
+  group must bring its plan along.
+  - The plans added on 2026-11-06 (the `rover_3a_3poi_c3_implicit` family,
+    `rover_2a_3poi_c2_implicit_ord`, `rover_6a_3poi_c3_implicit_ord`) and the
+    rewritten `rover_6a_6poi_c3_ord` came from an exhaustive search: the
+    whole team on one route and every two-team split into halves, each route
+    an ordered set of the POIs that can be used up followed by at most one
+    that cannot (the route policy never moves past it), 16 seeds per plan.
+    The search script is not in the repository.
+  - The `rover_1a_3poi_c1_implicit` family (2026-11-06) was not searched: it
+    reuses the `rover_3a_3poi_c3_implicit` route for a single rover, for the
+    reasons in the bullet on that group below.
   ```
   uv run python -m environments.rover.scripted_steps [--variants <group> ...] [--n-seeds 1000] [--figures 2]
   bash scripts/visualize_rover_routes.sh [any of the flags above]
@@ -1087,11 +1099,12 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   seeds. `--figures N` writes
   `plotting/rover/trajectories/<group>_routed_seed<k>.png` for seeds
   0..N-1. `scripts/visualize_rover_routes.sh` (added 2026-11-04) runs it from
-  any directory with `--figures 3 --n-seeds 3` (every group in about 30 s on
-  the CPU); its arguments override those. Measured over seeds 0–999 (steps = the step the last POI
+  any directory with `--figures 3 --n-seeds 3` (all 29 groups in about 45 s,
+  measured 2026-11-06); its arguments override those. Measured over seeds 0–999 (steps = the step the last POI
   is used up; every plan below collects the maximum on every seed except
-  `rover_6a_3poi_c3_implicit` and `rover_6a_6poi_c3`, whose rows give the
-  return instead):
+  the rows marked "never solved", which give the return instead; a
+  `(_hidden)` in a group's name stands for the `_hidden` twin with the same
+  plan and numbers):
 
   | group | plan (`rovers × route`) | steps to solve, median (range) |
   |---|---|---|
@@ -1100,20 +1113,32 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   | `rover_4a_2poi_c2_implicit` | 2 × 0, 2 × 1 | 68 (64–70) |
   | `rover_16a_2poi_c8` | 8 × 0, 8 × 1 | 17 (16–18) |
   | `rover_16a_2poi_c8_ord` (`_hidden`) | 8 × 0, 8 × 1 (second eight wait) | 27 (25–28) |
-  | `rover_2a_3poi_c2_implicit` | 2 × 0→1→2 | 95 (93–98) |
-  | `rover_4a_3poi_c3_implicit` | 4 × 0→1→2 | 94 (93–98) |
-  | `rover_4a_4poi_c1234` | 2 × 3→2→1, 1 × 3→2, 1 × 3→0 | 60 (56–64) |
+  | `rover_2a_3poi_c2_implicit` (`_hidden`) | 2 × 0→1→2 | 95 (93–98) |
+  | `rover_2a_3poi_c2_implicit_ord` (`_hidden`) | 2 × 0→1→2 (its order is this route) | 95 (93–98) |
+  | `rover_1a_3poi_c1_implicit012` (`_hidden`) | 1 × 0→1→2 | 94 (93–96) |
+  | `rover_1a_3poi_c1_implicit012_ord` (`_hidden`) | 1 × 0→1→2 (its order is this route) | 94 (93–96) |
+  | `rover_3a_3poi_c3_implicit` (`_hidden`) | 3 × 2→1(→0) | never solved: return 6.16 (6.08–6.24) of 10 |
+  | `rover_3a_3poi_c3_implicit_ord` (`_hidden`) | 3 × 2→1(→0) (its order is this route) | never solved: return 6.16 (6.08–6.24) of 10 |
+  | `rover_1a_3poi_c1_implicit` (`_hidden`) | 1 × 2→1(→0) | never solved: return 6.21 (6.13–6.28) of 10 |
+  | `rover_1a_3poi_c1_implicit_ord` (`_hidden`) | 1 × 2→1(→0) (its order is this route) | never solved: return 6.20 (6.08–6.28) of 10 |
+  | `rover_1a_4poi_c1_implicit` | 1 × 1→0→2→3 | 97 (96–100) |
+  | `rover_4a_4poi_c1234` (`_hidden`) | 2 × 3→2→1, 1 × 3→2, 1 × 3→0 | 60 (56–64) |
   | `rover_4a_4poi_c1234_ord` (`_hidden`) | 1 × 0→3, 2 × 1→2→3, 1 × 2→3 | 67 (65–71) |
-  | `rover_6a_6poi_c3` (two rings, 2026-11-05) | 3 × 2(→0), 3 × 3→4→5→1 | never solved: return 4.38 (4.31–4.44) of 6 |
-  | `rover_6a_6poi_c3_ord` (`_hidden`) | 3 × 0→2→4, 3 × 1→3→5 (teams alternate) | 66 (63–69) |
+  | `rover_6a_6poi_c3` (two rings, 2026-11-05) (`_hidden`) | 3 × 2(→0), 3 × 3→4→5→1 | never solved: return 4.38 (4.31–4.44) of 6 |
+  | `rover_6a_6poi_c3_ord` (`_hidden`) (2026-11-06) | 3 × 3→5(→2), 3 × 4→0(→1) | never solved: return 3.62 (3.59–3.66) of 6 |
   | `rover_16a_6poi_c844844` | 4 × 0→2, 4 × 0→1, 4 × 3→5, 4 × 3→4 | 34 (32–37) |
   | `rover_16a_6poi_c844844_ord` (`_hidden`) | same | 44 (42–47) |
-  | `rover_6a_3poi_c3_implicit` | 3 × 2→0, 3 × 1 | never solved: return 7.88 of 10 |
+  | `rover_6a_3poi_c3_implicit` | 3 × 2→0, 3 × 1 | never solved: return 7.89 (7.79–7.98) of 10 |
+  | `rover_6a_3poi_c3_implicit_ord` (`_hidden`) | 3 × 2→0, 3 × 1 (second team waits at POI 1) | never solved: return 6.44 (6.36–6.52) of 10 |
+
+  A POI in parentheses is never reached (the POI before it is never used up)
+  and is on the route only because `plan_routes` needs every POI on some
+  route.
 
   - Against the alternatives tried (64 seeds): the whole team working POIs
     one after another takes 40 steps on the two-POI groups (vs 17 and 27),
-    77 on `c1234` and `c1234_ord`, and 80 on the ordered ring (and on the old
-    single ring of `rover_6a_6poi_c3`).
+    77 on `c1234` and `c1234_ord`, and 80 on the old single-ring layout of
+    `rover_6a_6poi_c3` and its `_ord`.
     On `rover_4a_2poi_c2_implicit` it never finishes (8.0 of 9). On the
     `_implicit` 3-POI groups every other visiting order collects 61-89%.
   - **`rover_6a_6poi_c3`, two rings (2026-11-05).** Each inner POI pays 0.01
@@ -1139,10 +1164,86 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
       0.2 per step.
     - Before (same day): a 10×10 arena, inner rate 0.05 and outer radius 4.0,
       solved by `3 × 0→3→2, 3 × 5→1→4` in a median of 54 steps.
+  - **`rover_6a_6poi_c3_ord`, two rings (2026-11-06).** The order is outer
+    first (POIs 3, 4, 5 = orders 0-2), then inner (0, 1, 2 = orders 3-5).
+    Inner POI 0 is never used up, so POIs 1 and 2 never unlock and the
+    maximum is 3 plus POI 0's 0.01 per step. On seed 0: one team uses up
+    POI 3 at step 16; the other, waiting at POI 4, uses it up at step 21,
+    then parks on POI 0; the first team drives from POI 3 to POI 5 and uses
+    it up at step 38, after which POI 0 pays to the end. Best of 1944
+    plans (whole team and two-team splits, 16 seeds).
   - `rover_6a_3poi_c3_implicit` cannot be solved as configured: its POIs need
     100, 150 and 60 coupled steps (value / rate), and two teams of 3 supply
     at most 200 in 100 steps. The index-order scripted policy collects 2.71
-    (seed 0).
+    (seed 0). Under `_ord` (POI 2, then 1, then 0) the same plan is best
+    (18 plans searched): the second team waits at POI 1 until POI 2 is used
+    up, and POI 0 never unlocks, since POI 1 is never used up.
+  - `rover_3a_3poi_c3_implicit` (one team of 3): POIs 0 and 1 need 100 and
+    150 coupled steps, so the team stays on whichever comes second. POI 2
+    (6.0 in 60 steps) then POI 1 (0.02 per step) gives 6.16; POI 2 then POI 0
+    gives 6.11.
+  - **`rover_1a_3poi_c1_implicit` (2026-11-06)**, the one-rover version of
+    `rover_3a_3poi_c3_implicit`: it inherits that group (arena, spawn) and
+    restates its three POIs with coupling 1, so the visiting order stays and
+    the coordination goes. Same route, 2→1. It scores a little more than the
+    team of 3 (6.21 against 6.16) because a lone rover never waits for
+    teammates to enter a disc, and crossing POI 0's large disc on the way pays
+    a few hundredths. That crossing is why `_ord` (6.20), where POI 0 is
+    locked, scores slightly less than the unordered group. Its `_ord`,
+    `_ord_hidden` and `_hidden` groups mirror the 3-rover family's. With one
+    rover the agent block of the observation is all zeros (its normalizer
+    `n_agents − 1 = 0` is treated as 1), and the critic input is 16 wide.
+    Smoke-trained (2 updates, CPU) under `rmappo` and `mappo_mlp`.
+  - **`rover_1a_3poi_c1_implicit012` (2026-11-06)**, the one-rover version of
+    `rover_2a_3poi_c2_implicit`: it inherits that group (15×15 arena, spawn
+    `[3.42, 3.92] × [4.35, 4.85]`, radius 1, rate 0.1) and restates its three
+    POIs with coupling 1. `012` names its order and keeps it apart from
+    `rover_1a_3poi_c1_implicit`, the one-rover version of a different layout.
+    One rover works one POI at a time, as the 2-rover team did, so the order
+    stays unique.
+    - Checked over 1000 seeds with the bound described under
+      `rover_1a_4poi_c1_implicit` below: 60 paying steps leave 40 for travel.
+      0→1→2 needs 32-35 (scripted, solved at step 93-96). Every other order
+      needs at least 41, nearest-first (1→0→2) included; the rest need 47 or
+      more.
+    - The scripted rover finishes 1 to 2 steps sooner than the pair, since it
+      never waits for a teammate.
+    - Its `_ord` (orders 0, 1, 2), `_ord_hidden` and `_hidden` groups mirror
+      the 2-rover family's. Under `_ord` the lock never delays the route.
+  - **`rover_1a_4poi_c1_implicit` (2026-11-06)**: one rover, four POIs of
+    coupling 1 in a 15×15 arena, at (9, 1.5), (6, 4.5), (12, 7.5) and
+    (3, 12), radius 1, rate 0.1, values 1.2, 0.9, 1.8, 2.4 (12, 9, 18, 24
+    paying steps; maximum 6.3). Spawn box `[2.95, 3.45] × [1.95, 2.45]`.
+    Only the order 1→0→2→3 uses every POI up within 100 steps.
+    - Why: one rover pays one POI at a time, so the 63 paying steps are the
+      same in every order and 37 are left for travel. With one rover the
+      values set only this budget; the order is the shortest tour, here also
+      the nearest-first one, so the layout has no trap.
+    - Checked over 1000 seeds: the route 1→0→2→3 solves every seed, with
+      33-37 non-paying steps (at step 96-100). A lower bound puts every other
+      order at ≥ 38 for any policy. The bound counts straight-line travel
+      between disc edges, with the entering step counted as paying, a
+      heading-limited start, and return trips through discs already visited
+      allowed. The script is not in the repository.
+    - The margin is thin: on its worst seeds the right order finishes on
+      step 100. With 64 paying steps it misses on 14 seeds; with 62 the bound
+      no longer excludes a second order on 457.
+    - The positions were given; value and rate were designed for them, and
+      the spawn box shrunk from `[1.5, 4.5] × [0, 3]`. In that 3×3 box the
+      best order's travel varied by more than its lead over the second, and
+      no budget gave a unique order on more than 575 of 1000 seeds. Even a
+      0.5×0.5 box leaves at most 2 steps between the best and the next order
+      anywhere in the arena, because the random starting heading alone costs
+      up to 3 steps.
+    - Its yaml had `n_agents: 2`, apparently carried over from
+      `rover_2a_3poi_c2_implicit`; set to 1 on 2026-11-06, as its name says.
+    - Its `_ord` (orders 1, 0, 2, 3 for POIs 0-3, i.e. the route 1→0→2→3),
+      `_ord_hidden` and `_hidden` groups were added later the same day. As
+      written, `_hidden` inherits `_ord`, not `_ord_hidden`, so it hides
+      nothing and is the unordered task (the env warns that the order has no
+      effect), the mistake recorded above for
+      `rover_6a_3poi_c3_implicit_ord_hidden`. `_ord` and `_ord_hidden` have no
+      `ROUTE_PLANS` entry yet.
   - **`rover_16a_6poi_c844844`, the timing.** Couplings sum to 32 = 2 × 16
     rovers, so two waves: 8 rovers on each coupling-8 POI, (10,12) and
     (10,8), about 2 units from the spawn box; then 4 rovers per corner, each
@@ -1180,10 +1281,9 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   (multi-agent particle environment) demo with random actions; it is not part
   of the rover domain and nothing imports it. It is the only remaining user of
   the `jaxmarl` package.
-- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (82 tests,
-  CPU; on 2026-11-05, 23 fail on stale variant names, see Loose ends, 1
-  because `ROUTE_PLANS` names the deleted `rover_4a_3poi_c3_implicit`, and 2
-  because the `rover_6a_6poi_c3_ord` plans were written for the single ring).
+- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (97 tests,
+  CPU; on 2026-11-06, 22 fail on stale variant names (`rover_2poi_c2`,
+  `rover_4poi_c1234`), see Loose ends; all 34 route-plan tests pass).
   `algorithms/tests/test_reward_base.py` (12 tests, CPU, all pass): the base
   config is `None` for one-order layouts; for `rover_4a_2poi_c2_ord`,
   `_ord_hidden` and `rover_4a_4poi_c1234_hidden` it builds, without warnings,
@@ -1229,6 +1329,8 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   determinism; the route policy on `rover_16a_6poi_c844844` (return 6.0, the
   centre POIs used up at last centre entry + 9 and the episode solved within
   + 29 to + 31 steps, no rover leaving a POI that needs it, plan validation);
-  every `ROUTE_PLANS` entry (one test per group: names a current group, uses
-  every POI up on 2 seeds or reaches its floor, never abandons a POI); the PNG
+  every rover env group having a `ROUTE_PLANS` entry; every `ROUTE_PLANS`
+  entry (one test per group: names a current group, uses every POI up on 2
+  seeds or reaches its floor, a `_hidden` group its parent's floor, never
+  abandons a POI); the PNG
   writers for every variant.
