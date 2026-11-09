@@ -1242,8 +1242,11 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
       written, `_hidden` inherits `_ord`, not `_ord_hidden`, so it hides
       nothing and is the unordered task (the env warns that the order has no
       effect), the mistake recorded above for
-      `rover_6a_3poi_c3_implicit_ord_hidden`. `_ord` and `_ord_hidden` have no
-      `ROUTE_PLANS` entry yet.
+      `rover_6a_3poi_c3_implicit_ord_hidden`. Its 40 runs on disk (4 model
+      groups × 10 trials, finished 2026-11-09) trained that unordered task.
+      `_ord` and `_ord_hidden` have no `ROUTE_PLANS` entry yet. These are the
+      only problems a name-against-config check found among the 12
+      `rover_1a_*` groups (2026-11-09).
   - **`rover_16a_6poi_c844844`, the timing.** Couplings sum to 32 = 2 × 16
     rovers, so two waves: 8 rovers on each coupling-8 POI, (10,12) and
     (10,8), about 2 units from the spawn box; then 4 rovers per corner, each

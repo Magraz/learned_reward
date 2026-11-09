@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - rover_1a_4poi_c1_implicit_ord
+  - rover_1a_4poi_c1_implicit_ord_hidden
   - _self_
 
 env:
