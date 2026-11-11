@@ -1,0 +1,26 @@
+# @package _global_
+defaults:
+  - rover_6a_16poi_c6_grid
+  - _self_
+
+env:
+  pois:
+    enforce_order: true
+    entries:
+      # Follow the scripted route: 10, 5, 2, 7, 15, 13, 8, 0, 1, 4, 9, 6, 3, 11, 14, 12.
+      - {position: [2.5, 2.5], coupling: 6, value: 5.0, rate: 0.25, order: 7}
+      - {position: [7.5, 2.5], coupling: 6, value: 1.0, rate: 0.05, radius: 2.0, order: 8}
+      - {position: [12.5, 2.5], coupling: 6, value: 5.0, rate: 0.25, order: 2}
+      - {position: [17.5, 2.5], coupling: 6, value: 1.0, rate: 0.05, radius: 2.0, order: 12}
+      - {position: [2.5, 7.5], coupling: 6, value: 1.0, rate: 0.05, radius: 2.0, order: 9}
+      - {position: [7.5, 7.5], coupling: 6, value: 5.0, rate: 0.25, order: 1}
+      - {position: [12.5, 7.5], coupling: 6, value: 1.0, rate: 0.05, radius: 2.0, order: 11}
+      - {position: [17.5, 7.5], coupling: 6, value: 5.0, rate: 0.25, order: 3}
+      - {position: [2.5, 12.5], coupling: 6, value: 5.0, rate: 0.25, order: 6}
+      - {position: [7.5, 12.5], coupling: 6, value: 1.0, rate: 0.05, radius: 2.0, order: 10}
+      - {position: [12.5, 12.5], coupling: 6, value: 5.0, rate: 0.25, order: 0}
+      - {position: [17.5, 12.5], coupling: 6, value: 1.0, rate: 0.05, radius: 2.0, order: 13}
+      - {position: [2.5, 17.5], coupling: 6, value: 1.0, rate: 0.05, radius: 2.0, order: 15}
+      - {position: [7.5, 17.5], coupling: 6, value: 5.0, rate: 0.25, order: 5}
+      - {position: [12.5, 17.5], coupling: 6, value: 1.0, rate: 0.05, radius: 2.0, order: 14}
+      - {position: [17.5, 17.5], coupling: 6, value: 5.0, rate: 0.25, order: 4}

@@ -1,0 +1,56 @@
+# @package _global_
+# Rover domain: a 20x20, 4-POI version of rover_1a_3poi_c1_implicit012, built
+# to keep what makes hiding locked POIs necessary there (CLAUDE.md, "Why hiding
+# helps rover_1a_3poi_c1_implicit012"). 1 rover, 4 POIs of coupling 1, global
+# sensing, used-up POIs still sensed. Collecting every POI's value (8.4)
+# within the 143 steps is possible only by using the POIs up in the order
+# 0 -> 1 -> 2 -> 3:
+#   P0, the corner behind the spawn, first;
+#   P1, the POI nearest the spawn, second (going there first is the trap);
+#   P2, on the right wall, third;
+#   P3, near the top-right corner, last.
+# The spawn box, P0 and P1 are implicit012's, so the start and its trap are
+# the same.
+# Why the order is unique: one rover works one POI at a time, so using
+# everything up takes 12 + 24 + 24 + 24 = 84 paying steps (value / rate) in
+# every order, leaving 59 steps of travel. Order 0-1-2-3 needs 51-54 of them
+# (scripted route policy, 1000 spawn seeds, finished at step 135-138); every
+# other order needs at least 62, for any policy (lower bound: straight-line
+# travel between disc edges at full speed, the entering step counted as
+# paying, revisits allowed, heading ignored).
+# Why hiding should be needed (2026-11-11; a rover taking random actions is
+# the proxy for discovering a POI by chance; implicit012's last POI: 1.6% of
+# episodes from the spawn, 0.8% from the POI before it):
+#   - nothing in the observation says a POI is used up, so leaving P1 and P2
+#     on time needs a cue that only hiding gives (the next POI appears);
+#   - P2 and P3 are reached by chance from the spawn in 1.7% and 0.6% of
+#     episodes, and from the POI before them in 2.6% and 1.1%;
+#   - P2 and P3 hold 4.8 of the 8.4;
+#   - seen from P1 and P2, the next POI lies at least 100 degrees from every
+#     earlier POI, so a revealed POI never shares a sensor sector with a
+#     used-up one.
+# Everything the argument depends on is pinned here, not inherited.
+defaults:
+  - rover_4a_2poi_c2
+  - _self_
+
+env:
+  n_agents: 1
+  max_steps: 143
+  world_size: [20.0, 20.0]
+  spawn_region: [3.42, 3.92, 4.35, 4.85]   # implicit012's; small, so every seed has the same order
+  dynamics:
+    max_speed: 0.5
+    max_turn: 0.7853981633974483
+  observation:
+    sensor_radius: null                    # global sensing
+  pois:
+    type: static
+    radius: 1.0
+    rate: 0.1
+    hide_when_used_up: false               # a used-up POI is sensed like a live one
+    entries:
+      - {position: [1.0, 1.0], coupling: 1, value: 1.2}     # 12 steps, first
+      - {position: [7.75, 4.0], coupling: 1, value: 2.4}    # 24 steps, second (nearest)
+      - {position: [18.5, 9.0], coupling: 1, value: 2.4}    # 24 steps, third
+      - {position: [16.5, 19.0], coupling: 1, value: 2.4}   # 24 steps, last

@@ -1,0 +1,11 @@
+# @package _global_
+# rover_6a_4poi_c6_implicit_20x20_ord_hidden without the lock: POIs are
+# revealed in order but pay whenever their coupling is met, so the scored task
+# is rover_6a_4poi_c6_implicit_20x20's (an observation-only change).
+defaults:
+  - rover_6a_4poi_c6_implicit_20x20_ord_hidden
+  - _self_
+
+env:
+  pois:
+    enforce_order: false

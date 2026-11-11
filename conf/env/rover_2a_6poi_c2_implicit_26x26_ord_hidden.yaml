@@ -1,0 +1,11 @@
+# @package _global_
+# rover_2a_6poi_c2_implicit_26x26_ord with every locked POI hidden until it
+# unlocks: the same ordered task, only the observation changes. Each POI
+# appears on the step the one before it is used up.
+defaults:
+  - rover_2a_6poi_c2_implicit_26x26_ord
+  - _self_
+
+env:
+  pois:
+    hide_until_unlocked: true

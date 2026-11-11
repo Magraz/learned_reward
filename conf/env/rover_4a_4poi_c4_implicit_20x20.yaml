@@ -1,0 +1,26 @@
+# @package _global_
+# rover_1a_4poi_c1_implicit_20x20 with 4 rovers and every coupling 4: the
+# whole team must be inside a POI for it to pay, so one POI pays at a time.
+# The visiting order (0 -> 1 -> 2 -> 3), the trap and the long late
+# legs are the 1-rover group's: same arena, spawn box, POIs, values and
+# max_steps.
+# The scripted team (all 4 rovers on that route) uses every POI up on all
+# 1000 spawn seeds, finishing at step 135-140 of 143 (3-8 spare steps; the
+# lone rover's: 5-8). Every other order still does not fit: with coupling 4
+# each rover must make the whole trip itself, so the 1-rover bound holds for
+# each of them.
+# Discovery (2026-11-11), over 2048 episodes of random actions: the rovers
+# meet POI 0's coupling in 0 of them and POI 1's in 0 (a lone rover
+# enters them in 29% and 25%).
+defaults:
+  - rover_1a_4poi_c1_implicit_20x20
+  - _self_
+
+env:
+  n_agents: 4
+  pois:
+    entries:
+      - {position: [1.0, 1.0], coupling: 4, value: 1.2}     # 12 steps, first
+      - {position: [7.75, 4.0], coupling: 4, value: 2.4}    # 24 steps, second (nearest)
+      - {position: [18.5, 9.0], coupling: 4, value: 2.4}    # 24 steps, third
+      - {position: [16.5, 19.0], coupling: 4, value: 2.4}   # 24 steps, last

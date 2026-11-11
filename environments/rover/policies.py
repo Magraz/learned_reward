@@ -34,6 +34,7 @@ PARK_DEPTH = 0.9
 # is not proven optimal. Steps to solve are ``scripted_steps`` medians.
 _TWO_PAIRS = (((0,), 2), ((1,), 2))
 _TWO_EIGHTS = (((0,), 8), ((1,), 8))
+_GRID_16 = (((10, 5, 2, 7, 15, 13, 8, 0, 1, 4, 9, 6, 3, 11, 14, 12), 1),)
 # Couplings sum to 32 = 2 x 16 rovers, so two waves: 8 rovers on each centre POI
 # next to the spawn box, then 4 per corner, each corner team leaving from the
 # nearer centre POI.
@@ -73,6 +74,34 @@ ROUTE_PLANS = {
     # One rover, 63 paying steps in every order, 37 left for travel: only the
     # shortest tour, 1 -> 0 -> 2 -> 3, fits (see the group's yaml).
     "rover_1a_4poi_c1_implicit": (((1, 0, 2, 3), 1),),
+    # Its `_ord` order (1, then 0, 2, 3) is this route, so the lock never binds.
+    "rover_1a_4poi_c1_implicit_ord": (((1, 0, 2, 3), 1),),
+    # rover_1a_3poi_c1_implicit012's start (corner behind the spawn, then the
+    # nearest POI) followed by long legs to far POIs: in index order the only
+    # route that uses every POI up within the episode (see the groups' yaml).
+    # Each `_ord` order is this route, so the lock never binds. With n rovers
+    # every coupling is n, so the whole team takes the route together.
+    **{
+        f"rover_{n}a_{n_pois}poi_c{n}_implicit_{arena}{ordered}": ((tuple(range(n_pois)), n),)
+        for n in (1, 2, 4, 6)
+        for n_pois, arena in ((4, "20x20"), (6, "26x26"))
+        for ordered in ("", "_ord")
+    },
+    # Grid: 320 paying steps cannot fit in 100, so visit the value-5 POIs
+    # first, starting near the central spawn and taking short diagonal legs.
+    # Tied best of nine candidate routes over 32 seeds. The remaining POIs
+    # complete the plan's coverage but are not reached within the episode.
+    "rover_1a_16poi_c1_grid": _GRID_16,
+    # The ordered variant unlocks POIs in this same visiting order.
+    "rover_1a_16poi_c1_grid_ord": _GRID_16,
+    # Coupling requires the whole team at each POI, so all rovers follow
+    # the single-rover route together, also matching the ordered variants.
+    "rover_2a_16poi_c2_grid": ((_GRID_16[0][0], 2),),
+    "rover_2a_16poi_c2_grid_ord": ((_GRID_16[0][0], 2),),
+    "rover_4a_16poi_c4_grid": ((_GRID_16[0][0], 4),),
+    "rover_4a_16poi_c4_grid_ord": ((_GRID_16[0][0], 4),),
+    "rover_6a_16poi_c6_grid": ((_GRID_16[0][0], 6),),
+    "rover_6a_16poi_c6_grid_ord": ((_GRID_16[0][0], 6),),
     # The coupling-4 corner needs every rover, so it goes first. Then three
     # rovers take the coupling-3 corner and one the coupling-1 corner, both next
     # to it; then two of the three take the coupling-2 corner, next to both.

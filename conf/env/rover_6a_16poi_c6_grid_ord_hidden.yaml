@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - rover_6a_16poi_c6_grid_ord
+  - _self_
+
+env:
+  pois:
+    hide_until_unlocked: true

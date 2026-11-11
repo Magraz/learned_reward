@@ -1,0 +1,19 @@
+# @package _global_
+# rover_4a_6poi_c4_implicit_26x26 with its only full-collection order made
+# explicit: POI 0, then 1, 2, 3, 4 and 5.
+# The lock never delays that route; it only stops a POI from paying when the
+# team reaches it early (the trap, POI 1 first, pays nothing until POI 0 is
+# used up).
+defaults:
+  - rover_4a_6poi_c4_implicit_26x26
+  - _self_
+
+env:
+  pois:
+    entries:
+      - {position: [1.0, 1.0], coupling: 4, value: 1.2, order: 0}     # 12 steps, first
+      - {position: [7.75, 4.0], coupling: 4, value: 2.4, order: 1}    # 24 steps, second (nearest)
+      - {position: [19.5, 7.5], coupling: 4, value: 1.2, order: 2}    # 12 steps, third
+      - {position: [24.5, 18.5], coupling: 4, value: 1.2, order: 3}   # 12 steps, fourth
+      - {position: [13.5, 23.5], coupling: 4, value: 1.8, order: 4}   # 18 steps, fifth
+      - {position: [1.5, 23.5], coupling: 4, value: 2.4, order: 5}    # 24 steps, last

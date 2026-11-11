@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - rover_2a_16poi_c2_grid_ord_hidden
+  - _self_
+
+env:
+  pois:
+    enforce_order: false

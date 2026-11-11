@@ -901,10 +901,18 @@ def test_routed_rovers_never_leave_a_poi_that_still_needs_them():
     assert_routed_rovers_stay_while_needed(env, traj, routes)
 
 
-# Groups whose POIs need more coupled steps than the rovers can supply in one
-# episode: a floor below their plan's return over 1000 seeds (range in the
-# comment). A `<name>_hidden` group uses `<name>`'s floor, as it uses its plan.
+# Groups whose plans cannot clear every POI within the episode, including
+# travel and order locks: return floors checked over 1000 seeds.
+# A `<name>_hidden` group uses `<name>`'s floor, as it uses its plan.
 ROUTE_PLAN_FLOORS = {
+    "rover_1a_16poi_c1_grid": 15.0,  # three value-5 POIs; 320 paying steps cannot fit in 100
+    "rover_1a_16poi_c1_grid_ord": 15.0,  # same route, with rewards locked to its order
+    "rover_2a_16poi_c2_grid": 15.0,  # the whole team must collect each POI together
+    "rover_2a_16poi_c2_grid_ord": 15.0,
+    "rover_4a_16poi_c4_grid": 15.0,
+    "rover_4a_16poi_c4_grid_ord": 15.0,
+    "rover_6a_16poi_c6_grid": 15.0,
+    "rover_6a_16poi_c6_grid_ord": 15.0,
     "rover_3a_3poi_c3_implicit": 6.0,  # 6.08-6.24 of 10
     "rover_3a_3poi_c3_implicit_ord": 6.0,  # 6.08-6.24
     "rover_1a_3poi_c1_implicit": 6.0,  # 6.13-6.28 of 10

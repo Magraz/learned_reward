@@ -120,6 +120,26 @@ renders; `mappo_jax` with `model=mlp` trains and renders.
   used the single ring. Their `ROUTE_PLANS` entry was rewritten for the two
   rings on 2026-11-06.
 
+- **GPU training is not reproducible from one process to the next** (found
+  2026-11-09). On the GPU, the same group, model and seed run in two
+  processes already differs in the first rollout (critic values by up to
+  7e-4), and by the second update the actions differ by 0.4. On the CPU the
+  two processes are bit-identical. XLA chooses GPU kernels per process, and
+  different kernels round differently; RL amplifies the rounding into
+  different trajectories. `XLA_FLAGS=--xla_gpu_deterministic_ops=true` made
+  separate GPU processes bit-identical (RTX 4080 SUPER, 69 ms per
+  `rmappo` update with or without it; not measured with 16 trials per H100).
+  No launcher sets it yet. Consequences:
+  - Trial *t* of two arms shares a seed, but on the GPU that does not pair
+    the runs. Compare arms over trials, never trial by trial.
+  - With one rover, `difference_rewards` equals `shared_reward` bit for bit
+    (removing the only rover leaves every coupling-1 POI unmet, so
+    `D = G`), and the critic head has width 1 either way: the `_diffrew`
+    arms of the `rover_1a_*` groups compute what their shared arms do. On
+    the CPU, or on the GPU with the flag, they reproduce them exactly. The
+    `rover_1a_3poi_c1_implicit` `rmappo` / `rmappo_diffrew` curves differ
+    (5 vs 7 of 10 trials reach ~6; Fisher exact p = 0.65) only through this
+    GPU noise, so in effect those are 20 independent seeds of one method.
 - `conf/model/mlp.yaml` is missing again (found 2026-10-30, after the restore
   above; never committed), so `algorithm=mappo_jax model=mlp` fails with
   `Could not find 'model/mlp'`. Its content was `# @package _global_` and
@@ -361,8 +381,26 @@ mean over trials at each exact `total_steps`. Both reward figures use them.
   `multi_batches`, up to 3 columns, the same `experiments` and `trials` in each,
   one shared legend. Each experiment keeps one color across subplots, assigned
   by its position in `experiments`; `plot_colors` can override it by experiment
-  name (a `batch/experiment` key has no effect here). Y axes are not shared. The
-  cell prints a table of the trials found. Skipped if `multi_batches` is absent.
+  name (a `batch/experiment` key has no effect here). The cell prints a table
+  of the trials found. Skipped if `multi_batches` is absent.
+  - `multi_batches_share_y_axis` (added 2026-11-09, default `false`): `true`
+    gives every subplot the same y range, covering every batch's curves and
+    `max_rew_possible` line. Only the first column then keeps y tick labels.
+    `false` scales each subplot to its own data.
+  - `max_rew_possible` (optional mapping, added 2026-11-09): batch (env group)
+    name → highest possible reward, drawn as a grey dashed horizontal line in
+    that batch's subplot and listed in the legend as "Max possible reward".
+    It is keyed by batch because an `_ord` group can have a lower maximum than
+    its unordered parent (`rover_6a_6poi_c3` 4.38 vs `_ord` 3.62), and so that
+    commenting families in or out of `multi_batches` needs no edit. A batch
+    without an entry (or with `null`) gets no line, and the cell prints it. A
+    list raises a `TypeError`. The config holds every `ROUTE_PLANS` group's
+    mean scripted return over seeds 0-999 (`scripted_steps --n-seeds 1000`,
+    2026-11-09). For a solved group that is the sum of POI values; for an
+    unsolved one it is the best plan found, not a proven maximum.
+  - Cell 0 holds the helpers both grids use (here and in cell 3):
+    `make_multi_batch_grid` (the figure and its axes), `max_rewards_by_batch`
+    and `draw_max_reward`.
 - **Reward by update (cell 3):** both figures again with the PPO update number
   on the x axis. `load_reward_runs` adds an `update` column (the row position:
   every stats row is one update), and `summarize_rewards(..., x="update")`
@@ -377,6 +415,29 @@ mean over trials at each exact `total_steps`. Both reward figures use them.
   they are only used when a name matches.
 - `scripts/clean_notebooks.sh` clears the outputs of every notebook in the
   repository.
+- **Trajectory montages (`plotting/plot_learned_trajectories.py`, added
+  2026-11-09).** Tiles the `trajectory_seed<k>.png` figures that `view=true`
+  (or `scripts/view_results.sh`) left in each run's `logs/rover/`. It writes
+  one figure per experiment, trial and episode, with one panel per batch of
+  `multi_batches`, in that order, using `ceil(sqrt(n))` columns, the reward
+  grid's layout. Each panel is titled with its batch and its
+  `max_rew_possible`, because the figure's own title names only the model
+  group and prints "return x of <sum of POI values>". Episode k is the run's
+  k-th seed (= the trial's seed + k), the same seed in every panel.
+  - It reads `base_path`, `multi_batches`, `experiments`, `trials`,
+    `max_rew_possible` and `custom_labels` from the config.
+  - Flags: `--experiments`, `--trials` (default: config trials with at least
+    one figure on disk), `--episodes` (default `1 2 3`), `--columns`,
+    `--out-dir` (default `plotting/rover/learned_trajectories/`, git-ignored
+    like every PNG) and `--dpi` (220).
+  - A run without the figure gets an empty "no figure" panel. A figure older
+    than its run's saved model is flagged in its panel title, because it
+    shows an earlier policy.
+  - Measured 2026-11-09: the 12 `rover_1a` batches × 4 experiments × trial
+    0 gave 12 figures (7040 × 3200 px, about 3.5 MB each) in 33 s.
+  ```
+  uv run python plotting/plot_learned_trajectories.py [--experiments rmappo] [--trials 0] [--episodes 1]
+  ```
 
 ## Training stacks
 
@@ -955,6 +1016,50 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
       rarely meet a coupling ≥ 3 more than 3-4 units from the spawn, and PPO
       never found a POI whose coupling random rovers met in 0 of 1024
       episodes.
+    - **Why hiding helps `rover_1a_3poi_c1_implicit012` (2026-11-11).** Final
+      return (mean evaluation over the last 10% of updates, 10 trials per
+      arm): both hidden groups beat both unhidden ones in all 4 arms
+      (`rmappo`: 3.65 base, 3.62 `_ord`, 5.89 `_hidden`, 5.93 `_ord_hidden`
+      of 6.0), and the lock alone adds nothing. `rover_4a_4poi_c1234` has the
+      same ranking, for the reason given above.
+      - Replays (8 deterministic episodes per trial): unhidden, `rmappo` takes
+        1→0 (the trap) and parks. `_ord` takes 0→1, then sits on the used-up
+        POI 1 for 40 steps (82% of episodes end there). `_ord_hidden` uses
+        POI 1 up at the same step (55-58) and leaves within 1 step, collecting
+        2.31 of POI 2's 2.4.
+      - The mechanism, in four parts:
+        1. No cue: used-up POIs are sensed and no budget is observed, so
+           without hiding nothing marks the moment POI 1 runs out. Hiding
+           makes POI 2 appear on that step.
+        2. The lock gives no cue: by then every earlier POI is used up. It
+           fixes only the start, worth nothing here (1→0 and 0→1 both pay
+           3.6).
+        3. No discovery: with sampled (training-like) actions, after POI 1 is
+           used up the unhidden policies reach POI 2 in 4.4% of episodes
+           (`rmappo`, all from 1 trial of 10) and 0% (`mappo_mlp`), against
+           99% and 75% under `_ord_hidden`.
+        4. Slack: one rover empties POI 1 with the ~43 steps POI 2 needs
+           still left.
+      - Controls:
+        - `rover_2a_3poi_c2_implicit` (same layout, 2 rovers): POI 1 empties
+          at step 64-67, too late for POI 2, so hiding ties the lock.
+        - `rover_1a_3poi_c1_implicit`: the value is in the first POI, so the
+          lock and hiding tie.
+        - `rover_1a_4poi_c1_implicit`: the unhidden GRU learned every leg in
+          all 10 trials (base 6.1); hiding helps only `mappo_mlp` (episodes
+          ending parked on a used-up POI: 90% → 10%).
+      - Chance discovery (a rover taking uniform random actions, 1024
+        episodes per measurement):
+        - `implicit012`: its last POI is reached in 1.6% of episodes from the
+          spawn and 0.8% from POI 1 (never learned); its POI 1 in 10.8% from
+          POI 0 (learned).
+        - The 15×15 four-POI family's last POI: 6.25% from the spawn and 0.7%
+          from the POI before it, after two easier legs (22%, 11%). It was
+          learned.
+      - The critic's explained variance (0.97-0.99 for the GRU critic in every
+        group) does not separate the groups.
+      - The `_20x20` / `_26x26` groups (see the rover section) keep these
+        features.
     - Smoke-verified 2026-11-03: `rmappo_jax` trains (2 updates, CPU) and
       evaluates on `rover_4a_2poi_c2_ord01` (now `rover_4a_2poi_c2_ord`) with
       the flag on. Every variant builds with the flag off and on, observations
@@ -1076,8 +1181,7 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   nothing. The scripted rovers read the true state, so hiding changes nothing
   for them; each `_hidden` group scores exactly its parent's numbers. A rover
   whose target is locked parks there and waits. Tests check that every
-  `conf/env/rover_*.yaml` has a plan (39 of 41 on 2026-11-06: `rover_1a_4poi_c1_implicit_ord` and
-  `_ord_hidden` have none yet), that every plan
+  `conf/env/rover_*.yaml` has a plan (all 89 on 2026-11-11), that every plan
   names a current group, and run every plan, so a new, renamed or deleted
   group must bring its plan along.
   - The plans added on 2026-11-06 (the `rover_3a_3poi_c3_implicit` family,
@@ -1121,7 +1225,14 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   | `rover_3a_3poi_c3_implicit_ord` (`_hidden`) | 3 × 2→1(→0) (its order is this route) | never solved: return 6.16 (6.08–6.24) of 10 |
   | `rover_1a_3poi_c1_implicit` (`_hidden`) | 1 × 2→1(→0) | never solved: return 6.21 (6.13–6.28) of 10 |
   | `rover_1a_3poi_c1_implicit_ord` (`_hidden`) | 1 × 2→1(→0) (its order is this route) | never solved: return 6.20 (6.08–6.28) of 10 |
-  | `rover_1a_4poi_c1_implicit` | 1 × 1→0→2→3 | 97 (96–100) |
+  | `rover_1a_4poi_c1_implicit` (`_hidden`) | 1 × 1→0→2→3 | 97 (96–100) |
+  | `rover_1a_4poi_c1_implicit_ord` (`_hidden`) | 1 × 1→0→2→3 (its order is this route) | 97 (96–100) |
+  | `rover_1a_4poi_c1_implicit_20x20` (`_hidden`) | 1 × 0→1→2→3 | 136 (135–138) |
+  | `rover_1a_4poi_c1_implicit_20x20_ord` (`_hidden`) | 1 × 0→1→2→3 (its order is this route) | 136 (135–138) |
+  | `rover_1a_6poi_c1_implicit_26x26` (`_hidden`) | 1 × 0→1→2→3→4→5 | 199 (198–201) |
+  | `rover_1a_6poi_c1_implicit_26x26_ord` (`_hidden`) | 1 × 0→1→2→3→4→5 (its order is this route) | 199 (198–201) |
+  | `rover_<n>a_4poi_c<n>_implicit_20x20` for n = 2, 4, 6 (each with `_ord`, `_hidden`, `_ord_hidden`) | n × 0→1→2→3 | 137 / 138 / 139 (135–142) |
+  | `rover_<n>a_6poi_c<n>_implicit_26x26` for n = 2, 4, 6 (each with `_ord`, `_hidden`, `_ord_hidden`) | n × 0→1→2→3→4→5 | 200 / 201 / 202 (198–205) |
   | `rover_4a_4poi_c1234` (`_hidden`) | 2 × 3→2→1, 1 × 3→2, 1 × 3→0 | 60 (56–64) |
   | `rover_4a_4poi_c1234_ord` (`_hidden`) | 1 × 0→3, 2 × 1→2→3, 1 × 2→3 | 67 (65–71) |
   | `rover_6a_6poi_c3` (two rings, 2026-11-05) (`_hidden`) | 3 × 2(→0), 3 × 3→4→5→1 | never solved: return 4.38 (4.31–4.44) of 6 |
@@ -1238,15 +1349,95 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
     - Its yaml had `n_agents: 2`, apparently carried over from
       `rover_2a_3poi_c2_implicit`; set to 1 on 2026-11-06, as its name says.
     - Its `_ord` (orders 1, 0, 2, 3 for POIs 0-3, i.e. the route 1→0→2→3),
-      `_ord_hidden` and `_hidden` groups were added later the same day. As
-      written, `_hidden` inherits `_ord`, not `_ord_hidden`, so it hides
-      nothing and is the unordered task (the env warns that the order has no
-      effect), the mistake recorded above for
-      `rover_6a_3poi_c3_implicit_ord_hidden`. Its 40 runs on disk (4 model
-      groups × 10 trials, finished 2026-11-09) trained that unordered task.
-      `_ord` and `_ord_hidden` have no `ROUTE_PLANS` entry yet. These are the
-      only problems a name-against-config check found among the 12
-      `rover_1a_*` groups (2026-11-09).
+      `_ord_hidden` and `_hidden` groups were added later the same day.
+      `_hidden` first inherited `_ord` instead of `_ord_hidden`, so it hid
+      nothing and was the unordered task, the mistake recorded above for
+      `rover_6a_3poi_c3_implicit_ord_hidden`. A name-against-config check of
+      the 12 `rover_1a_*` groups found only this (2026-11-09). Fixed in
+      commit `4166940` (2026-11-09): it now inherits `_ord_hidden`, and
+      composed, all four POIs have `enforce_order: false` and
+      `hide_until_unlocked: true`, with only POI 1 (order 0) visible at
+      reset. Its 40 runs on disk (4 model groups × 10 trials) trained the
+      fixed, hidden task. Their file times show only when they were copied
+      (all 15:37 that day), but in every run `reward_base` differs from
+      `reward` (max gap 1.4-5.9). Without hiding, the two would be
+      identical: the order locks nothing there, so removing it changes no
+      observation or reward. `_ord` (and so `_ord_hidden`) got its
+      `ROUTE_PLANS` entry the same day.
+  - **`rover_1a_4poi_c1_implicit_20x20` and `rover_1a_6poi_c1_implicit_26x26`
+    (2026-11-11)**, each with `_ord`, `_ord_hidden` and `_hidden` groups that
+    mirror `rover_1a_3poi_c1_implicit012`'s.
+    - Purpose: larger versions of that group that keep what makes hiding
+      necessary there (see "Why hiding helps `rover_1a_3poi_c1_implicit012`").
+    - Kept from it: the spawn box, POI 0 at (1, 1) and POI 1 at (7.75, 4),
+      so the start and its trap are the same. Also one rover, coupling 1,
+      radius 1, rate 0.1, global sensing and used-up POIs still sensed.
+    - After POI 1 come long legs to far POIs.
+    - **4 POIs, 20×20, `max_steps` 143.**
+      - POI 2 at (18.5, 9), POI 3 at (16.5, 19); values 1.2 / 2.4 / 2.4 / 2.4
+        (8.4).
+      - Only 0→1→2→3 fits: it needs 51-54 of the 59 travel steps (scripted,
+        1000 seeds, solved at step 135-138), every other order ≥ 62
+        (bound).
+    - **6 POIs, 26×26, `max_steps` 206.**
+      - POIs 2-5 at (19.5, 7.5), (24.5, 18.5), (13.5, 23.5) and (1.5, 23.5),
+        a counterclockwise sweep around the far side of the arena; values
+        1.2 / 2.4 / 1.2 / 1.2 / 1.8 / 2.4 (10.2).
+      - Only 0→1→2→3→4→5 fits: 96-99 of 104 travel steps (solved at
+        198-201), every other order ≥ 109.
+    - Chance discovery of each late POI (random actions, 1024 episodes; from
+      the POI before it / from the spawn):
+      - 4 POIs: POI 2 2.6% / 1.7%, POI 3 1.1% / 0.6%.
+      - 6 POIs: 5.1% / 3.4%, 4.7% / 0.3%, 3.0% / 0.9%, 0.3% / 3.1%.
+    - Seen from each POI, the next one lies ≥ 100° (4 POIs) or ≥ 60°
+      (6 POIs) from every earlier POI, so a revealed POI never shares a 45°
+      sensor sector with a used-up one.
+    - Why 26×26 for 6 POIs (the author's choice, 2026-11-11, over the 20×20
+      first asked for): in 20×20 the four late legs could only be ~9 units
+      long. Chance discovery from the previous POI was then 9.6%, 9.6%, 7.5%
+      and 2.2%, the level of `implicit012`'s easy leg. Even in 26×26 the
+      earlier late legs stay above its hard leg (0.8%), because more of the
+      episode is left after them.
+    - The order bound: straight-line travel between disc edges at full speed,
+      the entering step counted as paying, up to two revisits, heading
+      ignored (weaker than the 15×15 groups' bound, and still enough). The
+      design scripts are not in the repository.
+    - Smoke-trained 2026-11-11 (`rmappo_jax`, `rmappo` and `mappo_mlp`, 2
+      updates, CPU, both `_ord_hidden` groups): trains, evaluates and logs
+      `reward_base`. No training result yet.
+    - **2-, 4- and 6-rover versions (2026-11-11)**: `rover_<n>a_4poi_c<n>_implicit_20x20`
+      and `rover_<n>a_6poi_c<n>_implicit_26x26` for n = 2, 4, 6, each with
+      `_ord`, `_ord_hidden` and `_hidden` (24 groups).
+      - Each inherits its 1-rover group and changes only `n_agents` and every
+        coupling. The coupling equals the team size (the author's choice): the
+        whole team must be inside a POI for it to pay, so one POI pays at a
+        time, and the order, the trap and the late legs stay the 1-rover
+        group's. `max_steps` is unchanged (143, 206).
+      - The yaml files were generated from the 1-rover groups' composed
+        configs (the script is not in the repository). One `ROUTE_PLANS`
+        comprehension covers n = 1, 2, 4, 6: the whole team on the index-order
+        route.
+      - Scripted team, 1000 seeds: every seed solved. Finished at step
+        135-140 (2 and 4 rovers) and 136-142 (6) of 143; 198-203 and 199-205
+        of 206. Spare steps shrink from the lone rover's 5-8 to 3-8 and 1-7.
+      - Every other order still does not fit: with coupling = team size each
+        rover makes the whole trip itself, so the 1-rover bound holds for
+        each of them.
+      - Discovery (2048 episodes of random actions; POI 0 / POI 1 coupling
+        met):
+        - 2 rovers: 1.5% / 0.6% (20×20) and 1.9% / 0.7% (26×26);
+        - 4 and 6 rovers: never.
+        - For comparison: `rover_2a_3poi_c2_implicit` 1.2% / 0.5%, and its
+          teams learned POI 1 in every trial. `rover_3a_3poi_c3_implicit`'s
+          POI 2: 0%; its `_ord` scored 0 in all 40 trials, but its `_hidden`
+          reached 4.3-4.9, because one visible POI gathers the team.
+        - Expected: the unhidden 4- and 6-rover groups score near 0, and
+          hiding matters there for gathering the team, not only as the
+          departure cue.
+      - Slack risk: on `implicit012`'s layout the learned 2-rover team emptied
+        POI 1 about 10 steps later than the lone rover (step 64-67 against
+        55-58), which used up the slack hiding needs. The spare steps above
+        are scripted; larger teams likely lose more.
   - **`rover_16a_6poi_c844844`, the timing.** Couplings sum to 32 = 2 × 16
     rovers, so two waves: 8 rovers on each coupling-8 POI, (10,12) and
     (10,8), about 2 units from the spawn box; then 4 rovers per corner, each
@@ -1284,9 +1475,9 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   (multi-agent particle environment) demo with random actions; it is not part
   of the rover domain and nothing imports it. It is the only remaining user of
   the `jaxmarl` package.
-- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (97 tests,
-  CPU; on 2026-11-06, 22 fail on stale variant names (`rover_2poi_c2`,
-  `rover_4poi_c1234`), see Loose ends; all 34 route-plan tests pass).
+- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (153 tests,
+  CPU; on 2026-11-11, 22 fail on stale variant names (`rover_2poi_c2`,
+  `rover_4poi_c1234`), see Loose ends; all 89 route-plan tests pass).
   `algorithms/tests/test_reward_base.py` (12 tests, CPU, all pass): the base
   config is `None` for one-order layouts; for `rover_4a_2poi_c2_ord`,
   `_ord_hidden` and `rover_4a_4poi_c1234_hidden` it builds, without warnings,

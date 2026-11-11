@@ -1,0 +1,65 @@
+# @package _global_
+# Rover domain: a 26x26, 6-POI version of rover_1a_3poi_c1_implicit012, built
+# to keep what makes hiding locked POIs necessary there (CLAUDE.md, "Why hiding
+# helps rover_1a_3poi_c1_implicit012"). 1 rover, 6 POIs of coupling 1, global
+# sensing, used-up POIs still sensed. Collecting every POI's value (10.2)
+# within the 206 steps is possible only by using the POIs up in the order
+# 0 -> 1 -> 2 -> 3 -> 4 -> 5, a counterclockwise sweep around the far side of
+# the arena:
+#   P0, the corner behind the spawn, first;
+#   P1, the POI nearest the spawn, second (going there first is the trap);
+#   P2, lower right; P3, on the right wall; P4, top middle; P5, top-left
+#   corner, last.
+# The spawn box, P0 and P1 are implicit012's, so the start and its trap are
+# the same. 26x26 rather than 20x20 (the author's choice, 2026-11-11): in
+# 20x20 the four late legs could only be ~9 units long, and a rover taking
+# random actions reached the next POI from the previous one in 9.6%, 9.6%,
+# 7.5% and 2.2% of episodes, the level of implicit012's easy leg (10.8%).
+# Why the order is unique: one rover works one POI at a time, so using
+# everything up takes 12 + 24 + 12 + 12 + 18 + 24 = 102 paying steps
+# (value / rate) in every order, leaving 104 steps of travel. Order
+# 0-1-2-3-4-5 needs 96-99 of them (scripted route policy, 1000 spawn seeds,
+# finished at step 198-201); every other order needs at least 109, for any
+# policy (lower bound: straight-line travel between disc edges at full speed,
+# the entering step counted as paying, up to two revisits, heading ignored).
+# Why hiding should be needed (2026-11-11; random-action reach as above;
+# implicit012's last POI: 1.6% of episodes from the spawn, 0.8% from the POI
+# before it):
+#   - nothing in the observation says a POI is used up, so leaving each POI
+#     on time needs a cue that only hiding gives (the next POI appears);
+#   - each late leg is 12 units long; P2-P5 are reached by chance from the
+#     POI before them in 5.1%, 4.7%, 3.0% and 0.3% of episodes, and from the
+#     spawn in 3.4%, 0.3%, 0.9% and 3.1%. The earlier late legs are easier to
+#     stumble on than implicit012's hard leg, because more of the episode is
+#     left after them;
+#   - P2-P5 hold 6.6 of the 10.2;
+#   - seen from each POI, the next one lies at least 60 degrees from every
+#     earlier POI, so a revealed POI never shares a sensor sector with a
+#     used-up one.
+# Everything the argument depends on is pinned here, not inherited.
+defaults:
+  - rover_4a_2poi_c2
+  - _self_
+
+env:
+  n_agents: 1
+  max_steps: 206
+  world_size: [26.0, 26.0]
+  spawn_region: [3.42, 3.92, 4.35, 4.85]   # implicit012's; small, so every seed has the same order
+  dynamics:
+    max_speed: 0.5
+    max_turn: 0.7853981633974483
+  observation:
+    sensor_radius: null                    # global sensing
+  pois:
+    type: static
+    radius: 1.0
+    rate: 0.1
+    hide_when_used_up: false               # a used-up POI is sensed like a live one
+    entries:
+      - {position: [1.0, 1.0], coupling: 1, value: 1.2}     # 12 steps, first
+      - {position: [7.75, 4.0], coupling: 1, value: 2.4}    # 24 steps, second (nearest)
+      - {position: [19.5, 7.5], coupling: 1, value: 1.2}    # 12 steps, third
+      - {position: [24.5, 18.5], coupling: 1, value: 1.2}   # 12 steps, fourth
+      - {position: [13.5, 23.5], coupling: 1, value: 1.8}   # 18 steps, fifth
+      - {position: [1.5, 23.5], coupling: 1, value: 2.4}    # 24 steps, last
