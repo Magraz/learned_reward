@@ -35,6 +35,7 @@ from environments.rover.policies import (
     ROUTE_PLANS,
     entry_steps,
     make_scripted_coalition_policy,
+    plan_parent,
     plan_routes,
     planned_rollouts,
     random_policy,
@@ -903,7 +904,8 @@ def test_routed_rovers_never_leave_a_poi_that_still_needs_them():
 
 # Groups whose plans cannot clear every POI within the episode, including
 # travel and order locks: return floors checked over 1000 seeds.
-# A `<name>_hidden` group uses `<name>`'s floor, as it uses its plan.
+# A `<name>_hidden` or `<name>_gs` group uses `<name>`'s floor, as it uses its
+# plan (`policies.plan_parent`).
 ROUTE_PLAN_FLOORS = {
     "rover_1a_16poi_c1_grid": 15.0,  # three value-5 POIs; 320 paying steps cannot fit in 100
     "rover_1a_16poi_c1_grid_ord": 15.0,  # same route, with rewards locked to its order
@@ -938,7 +940,7 @@ def test_every_route_plan_names_a_current_group_and_solves_it(variant):
     keys = jax.vmap(jax.random.PRNGKey)(jnp.arange(2))
     traj, routes = planned_rollouts(env, keys, ROUTE_PLANS[variant])
     returns = np.asarray(traj.episode_return)
-    floor = ROUTE_PLAN_FLOORS.get(variant.removesuffix("_hidden"))
+    floor = ROUTE_PLAN_FLOORS.get(plan_parent(variant))
     if floor is not None:
         assert np.all(returns >= floor)
     else:

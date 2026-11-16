@@ -25,6 +25,12 @@ env:
     type: sector_density             # 8 agent + 8 POI heading-relative sectors
     n_sectors: 8
     sensor_radius: null              # null = arena diagonal (sense everything)
+  # true: the env publishes a global state (rover positions, POI positions,
+  # POI remaining budgets; 2 * n_agents + 3 * n_pois values in [0, 1]). The
+  # critic of both stacks then reads it instead of the concatenated
+  # observations, and the rmappo_jax POI manager (params.use_poi_manager)
+  # requires it. Not in the results path: give it its own env group.
+  global_state: false
   reward:
     type: coupling_depletion         # team reward; POIs pay until used up
     # What every rover trains on: shared_reward (the team reward, one team

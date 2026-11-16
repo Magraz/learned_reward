@@ -21,6 +21,10 @@ Rollouts follow on-policy's shared runner (`runner/shared/*_runner.py`):
   `use_proper_time_limits=False`). With the flag on, this repo's bootstrap is
   used instead: the real successor is valued before the restart, through the
   critic's advanced hidden state, and `gamma * V` is added to the reward.
+- With `use_poi_manager` (not on-policy's, see `manager.py`), the manager
+  picks every step which POIs the rovers sense, the rovers act on the masked
+  observation, and the trajectory and bootstrap value become (rovers',
+  manager's) pairs, each trained by its own `ppo_update`.
 
 `make_train` returns the same `(init_fn, collect_fn, update_fn, eval_fn,
 num_updates)` contract as `mappo_jax`, so `MAPPO_JAX_Runner.train` drives it.
@@ -40,6 +44,7 @@ from algorithms.mappo_jax.trainer import (
     restart_done_envs,
     training_reward,
 )
+from algorithms.rmappo_jax import manager as manager_lib
 from algorithms.rmappo_jax import value_norm as vn_lib
 from algorithms.rmappo_jax.mappo import (
     RMAPPOTrainState,
@@ -83,6 +88,8 @@ def validate(config: RMAPPOConfig, env):
             f"n_steps={config.n_steps} is not a multiple of "
             f"data_chunk_length={config.data_chunk_length}"
         )
+    if config.use_poi_manager:
+        manager_lib.validate_manager(config, env)
 
 
 def actor_step(
@@ -142,6 +149,22 @@ def make_train(config: RMAPPOConfig, env):
     use_action_mask = hasattr(env, "avail_actions")
     _v_avail = jax.vmap(env.avail_actions) if use_action_mask else None
 
+    # The POI manager (manager.py): before the rovers act, it picks which POIs
+    # every rover senses, and the rovers' observation is rebuilt under that
+    # mask. Its keys are folded from the rovers' (`fold_in(..., 1)`), so the
+    # rovers' key chains match a run without it.
+    use_manager = config.use_poi_manager
+    if use_manager:
+        mconfig = manager_lib.manager_config(config)
+        v_observe = jax.vmap(env.observe)
+
+    def _managed_obs(train_state, global_state, mask, env_state, rng, deterministic):
+        """The manager's decision and the rovers' observation under it."""
+        poi_mask, log_prob, value = manager_lib.manager_step(
+            train_state.manager, global_state, mask, rng, deterministic
+        )
+        return v_observe(env_state, poi_mask), (poi_mask, log_prob, value)
+
     def _avail(env_state):
         return _v_avail(env_state) if use_action_mask else None
 
@@ -166,6 +189,12 @@ def make_train(config: RMAPPOConfig, env):
             init_rng, config, obs_dim, gs_dim, action_dim, discrete, num_updates,
             n_critic_outputs=n_critic_outputs(env),
         )
+        if use_manager:
+            train_state = train_state._replace(
+                manager=manager_lib.init_manager(
+                    jax.random.fold_in(init_rng, 1), config, env, num_updates
+                )
+            )
         obs, env_state = v_reset(jax.random.split(reset_rng, config.n_envs))
         hidden = zero_hidden(config, (config.n_envs, n_agents))
         # The critic runs once per env, so it has one hidden state per env.
@@ -188,6 +217,11 @@ def make_train(config: RMAPPOConfig, env):
         rng, action_rng, reset_rng = jax.random.split(rng, 3)
 
         global_state = _global_state(obs, env_state)
+        if use_manager:
+            obs, manager_out = _managed_obs(
+                train_state, global_state, mask, env_state,
+                jax.random.fold_in(action_rng, 1), deterministic=False,
+            )
         action_mask = _avail(env_state)
         actions, log_probs, next_actor_h = actor_step(
             train_state.actor_ts.apply_fn,
@@ -262,6 +296,14 @@ def make_train(config: RMAPPOConfig, env):
             1.0 - done.astype(jnp.float32),
             rng,
         )
+        if use_manager:
+            poi_mask, m_log_prob, m_value = manager_out
+            transition = (
+                transition,
+                manager_lib.manager_transition(
+                    global_state, mask, poi_mask, m_log_prob, m_value, team_reward, done
+                ),
+            )
         return carry, transition
 
     @jax.jit
@@ -282,17 +324,26 @@ def make_train(config: RMAPPOConfig, env):
             length=config.n_steps,
         )
         # `compute`: the bootstrap value of the step after the rollout.
+        last_global_state = _global_state(obs, env_state)
         last_value, _ = critic_step(
             rs.train_state.critic_ts.apply_fn,
             rs.train_state.critic_ts.params,
-            _global_state(obs, env_state),
+            last_global_state,
             critic_h,
             mask,
             n_agents,
         )
+        # With the manager, the trajectory and the bootstrap value are
+        # (rovers', manager's) pairs; the runner passes both through opaquely.
+        rover_trajectory = trajectory[0] if use_manager else trajectory
+        if use_manager:
+            last_value = (
+                last_value,
+                manager_lib.manager_value(rs.train_state.manager, last_global_state, mask),
+            )
         rollout_stats = {
-            "mean_reward": trajectory.team_reward.mean(),
-            "episode_count": trajectory.done.sum(),
+            "mean_reward": rover_trajectory.team_reward.mean(),
+            "episode_count": rover_trajectory.done.sum(),
         }
         new_state = rs._replace(
             rng=rng,
@@ -309,6 +360,9 @@ def make_train(config: RMAPPOConfig, env):
     @jax.jit
     def update_fn(runner_state: RunnerState, trajectory, last_value):
         rng, update_rng = jax.random.split(runner_state.rng)
+        if use_manager:
+            trajectory, manager_trajectory = trajectory
+            last_value, manager_last_value = last_value
         train_state, losses = ppo_update(
             runner_state.train_state,
             update_rng,
@@ -317,12 +371,39 @@ def make_train(config: RMAPPOConfig, env):
             config,
             discrete,
         )
+        if use_manager:
+            # The manager's own PPO update, on the same rollout.
+            manager, manager_losses = ppo_update(
+                runner_state.train_state.manager,
+                jax.random.fold_in(update_rng, 1),
+                manager_trajectory,
+                manager_last_value,
+                mconfig,
+                True,
+                multi_binary=True,
+            )
+            train_state = train_state._replace(manager=manager)
+            losses = {
+                **losses,
+                **{f"manager_{key}": value for key, value in manager_losses.items()},
+                "manager_pois_shown": manager_lib.pois_shown(manager_trajectory),
+            }
         return runner_state._replace(train_state=train_state, rng=rng), losses
 
     # ------------------------------------------------------------------ eval
 
     def _eval_act(train_state, hidden, obs, env_state):
         # One episode per env and no restarts, so the mask is always 1.
+        if use_manager:
+            # The manager's most likely mask, then the rovers act on it.
+            obs, _ = _managed_obs(
+                train_state,
+                _global_state(obs, env_state),
+                jnp.ones((obs.shape[0],)),
+                env_state,
+                jax.random.PRNGKey(0),
+                deterministic=True,
+            )
         actions, _, hidden = actor_step(
             train_state.actor_ts.apply_fn,
             train_state.actor_ts.params,

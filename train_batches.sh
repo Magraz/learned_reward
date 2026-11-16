@@ -75,12 +75,15 @@
 ALGORITHM_FROM_ENV=${ALGORITHM:-}
 
 BATCH_NAMES=(
-"rover_2poi_c2" "rover_2poi_c8" "rover_4poi_c1234" "rover_6poi_c3_ring" "rover_6poi_c8-4-4-8-4-4"
+"rover_1a_16poi_c1_grid"
+#"rover_2poi_c2" "rover_2poi_c8" "rover_4poi_c1234" "rover_6poi_c3_ring" "rover_6poi_c8-4-4-8-4-4"
 )
 
 EXPERIMENT_NAMES=(
 "mappo_mlp"
+"mappo_mlp_diffrew"
 "rmappo"
+"rmappo_diffrew"
 # "mlp"
 # "simplified_feudal_tanh_relative_input"
 # "simplified_feudal_tanh_relative_input_interventions_bandit" "simplified_feudal_tanh_relative_input_interventions_bandit_no_zero_penalty"

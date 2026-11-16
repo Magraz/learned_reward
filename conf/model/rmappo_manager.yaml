@@ -1,0 +1,10 @@
+# @package _global_
+# rmappo_jax's recurrent policy (`rmappo`) plus the learned POI manager
+# (algorithms/rmappo_jax/manager.py): every step it picks which POIs every
+# rover senses, from the env's global state. Needs an env group with
+# `env.global_state: true` (e.g. rover_2a_3poi_c2_implicit_gs).
+model_params:
+  use_recurrent_policy: true
+
+params:
+  use_poi_manager: true

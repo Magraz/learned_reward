@@ -66,6 +66,14 @@ class Params:
     data_chunk_length: int = 10
     n_eval_episodes: int = 32
     eval_interval: int = 25  # updates between deterministic evals
+    # Not on-policy's: a learned manager that picks, every step, which POIs
+    # every rover senses (see manager.py). Needs the env's global state
+    # (rover `env.global_state: true`).
+    use_poi_manager: bool = False
+    # Initial Bernoulli logit bias of the manager per POI: at 3.0 each
+    # POI starts shown with probability sigmoid(3) = 0.95, independently, so
+    # every POI is shown with probability 0.95^P (0.86 at 3 POIs, 0.75 at 6).
+    manager_init_bias: float = 3.0
 
 
 @dataclass
@@ -124,6 +132,8 @@ class RMAPPOConfig:
     data_chunk_length: int = 10
     n_eval_episodes: int = 32
     eval_interval: int = 25
+    use_poi_manager: bool = False
+    manager_init_bias: float = 3.0
     use_recurrent_policy: bool = True
     hidden_size: int = 64
     layer_N: int = 1
@@ -182,6 +192,8 @@ def make_config(params: Params, model_params: Model_Params, n_envs: int):
         data_chunk_length=params.data_chunk_length,
         n_eval_episodes=params.n_eval_episodes,
         eval_interval=params.eval_interval,
+        use_poi_manager=params.use_poi_manager,
+        manager_init_bias=params.manager_init_bias,
         **dataclasses.asdict(model_params),
     )
 

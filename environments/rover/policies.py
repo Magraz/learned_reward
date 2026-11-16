@@ -143,14 +143,29 @@ ROUTE_PLANS = {
     "rover_6a_3poi_c3_implicit": (((2, 0), 3), ((1,), 3)),
     "rover_6a_3poi_c3_implicit_ord": (((2, 0), 3), ((1,), 3)),
 }
-# Hiding changes only what the rovers sense, and these rovers read the true
-# state, so a group `<name>_hidden` uses `<name>`'s plan: an `_ord_hidden` group
-# its `_ord` group's (same task), and a plain `_hidden` group
-# (`enforce_order: false`, so the order locks nothing) its unordered group's.
+# Suffixes that change what the rovers sense or what the critic reads, never
+# the task, so a group carrying one uses its parent's plan. These rovers read
+# the true state, so neither changes their route:
+# - `_hidden`: an `_ord_hidden` group uses its `_ord` group's plan (same task),
+#   and a plain `_hidden` group (`enforce_order: false`, so the order locks
+#   nothing) its unordered group's;
+# - `_gs` (global state published): `<name>_gs` uses `<name>`'s.
+# Stripped last to first: `<name>_hidden_gs` -> `<name>_hidden` -> `<name>`.
+_SENSING_SUFFIXES = ("_gs", "_hidden")
+
+
+def plan_parent(variant):
+    """The group whose plan (and return floor) ``variant`` shares: ``variant``
+    without its ``_gs``, then its ``_hidden`` suffix."""
+    for suffix in _SENSING_SUFFIXES:
+        variant = variant.removesuffix(suffix)
+    return variant
+
+
 ROUTE_PLANS.update({
-    variant: ROUTE_PLANS[variant.removesuffix("_hidden")]
+    variant: ROUTE_PLANS[plan_parent(variant)]
     for variant in list_variants()
-    if variant.endswith("_hidden") and variant.removesuffix("_hidden") in ROUTE_PLANS
+    if variant not in ROUTE_PLANS and plan_parent(variant) in ROUTE_PLANS
 })
 
 

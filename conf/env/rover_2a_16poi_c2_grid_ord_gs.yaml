@@ -1,0 +1,12 @@
+# @package _global_
+# rover_2a_16poi_c2_grid_ord with the env's global state published: rover positions, POI
+# positions and POI remaining budgets, 52 values (2 rovers, 16 POIs).
+# The task is unchanged; the critic reads the global state instead of the
+# concatenated observations.
+# The rmappo_jax POI manager uses one Bernoulli output per POI.
+defaults:
+  - rover_2a_16poi_c2_grid_ord
+  - _self_
+
+env:
+  global_state: true

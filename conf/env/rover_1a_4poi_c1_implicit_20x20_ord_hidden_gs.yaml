@@ -1,0 +1,12 @@
+# @package _global_
+# rover_1a_4poi_c1_implicit_20x20_ord_hidden with the env's global state published: rover positions, POI
+# positions and POI remaining budgets, 14 values (1 rovers, 4 POIs).
+# The task is unchanged; the critic reads the global state instead of the
+# concatenated observations.
+# The rmappo_jax POI manager (model=rmappo_manager) needs the global state.
+defaults:
+  - rover_1a_4poi_c1_implicit_20x20_ord_hidden
+  - _self_
+
+env:
+  global_state: true

@@ -55,6 +55,12 @@ class BaseRoverEnv:
         max_speed: distance covered per step at ``a[1] = 1``.
         max_turn: heading change (radians) per step at ``|a[0]| = 1``.
         max_steps: episode length; ``truncated`` fires at this step.
+        global_state: true publishes ``global_state(state)`` and
+            ``global_state_dim`` (see ``_global_state``), the hook the JAX
+            stacks' critics read (``mappo_jax.trainer.global_state_fn``) and
+            the ``rmappo_jax`` POI manager requires. False (default): neither
+            attribute exists, so the critics read the concatenated
+            observations.
     """
 
     action_dim = 2
@@ -72,6 +78,7 @@ class BaseRoverEnv:
         max_speed=0.5,
         max_turn=math.pi / 4,
         max_steps=100,
+        global_state=False,
     ):
         self.n_agents = int(n_agents)
         if self.n_agents < 1:
@@ -117,6 +124,13 @@ class BaseRoverEnv:
             jax.eval_shape(lambda k: self.pois.init(k, self), key).position.shape[0]
         )
         self.observation_dim = int(self.observation.obs_dim)
+        if not isinstance(global_state, bool):
+            raise ValueError(f"global_state must be true or false, got {global_state!r}")
+        if global_state:
+            # Instance attributes, set only under the flag: the stacks detect
+            # the hook with `hasattr(env, "global_state")`.
+            self.global_state = self._global_state
+            self.global_state_dim = 2 * self.n_agents + 3 * self.n_pois
         # Abstract evaluation (no FLOPs): the declared width must be what is emitted.
         obs_shape = jax.eval_shape(lambda k: self.reset(k)[0], key).shape
         if obs_shape != (self.n_agents, self.observation_dim):
@@ -167,8 +181,28 @@ class BaseRoverEnv:
         }
         return self.observe(next_state), next_state, reward, terminated, truncated, info
 
-    def observe(self, state):
-        return self.observation(self, state)
+    def observe(self, state, poi_mask=None):
+        """(n_agents, obs_dim) observations of ``state``. ``poi_mask`` (P,)
+        bool, when given, hides every POI where it is false from every rover,
+        on top of the POIs' own hiding flags (the ``rmappo_jax`` POI manager's
+        action). It changes what the rovers sense, never what the POIs pay."""
+        if poi_mask is None:
+            return self.observation(self, state)
+        return self.observation(self, state, poi_mask=poi_mask)
+
+    def _global_state(self, state):
+        """The global state, ``global_state_dim`` values in [0, 1]: rover
+        positions, then POI positions (both divided by the arena size, x then
+        y per entity), then each POI's remaining budget divided by its value.
+        Published as ``global_state`` only when the env is built with
+        ``global_state=True``."""
+        size = jnp.asarray(self.world_size, dtype=jnp.float32)
+        pois = state.pois
+        return jnp.concatenate([
+            (state.rovers.position / size).reshape(-1),
+            (pois.position / size).reshape(-1),
+            pois.remaining / pois.value,
+        ])
 
     # ------------------------------------------------------------ dynamics
 

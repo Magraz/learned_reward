@@ -235,6 +235,29 @@ def _masked_logits(logits, action_mask):
     return jnp.where(action_mask == 0, UNAVAILABLE_LOGIT, logits)
 
 
+def evaluate_bernoulli(logits, action):
+    """Joint log-probability and entropy of independent binary action dims."""
+    log_show = jax.nn.log_sigmoid(logits)
+    log_hide = jax.nn.log_sigmoid(-logits)
+    log_prob = jnp.where(action, log_show, log_hide).sum(axis=-1)
+    entropy = -(
+        jax.nn.sigmoid(logits) * log_show
+        + jax.nn.sigmoid(-logits) * log_hide
+    ).sum(axis=-1)
+    return log_prob, entropy
+
+
+def sample_bernoulli(rng, logits, deterministic: bool):
+    """Sample a binary mask, or choose each bit's mode (show on a tie)."""
+    action = (
+        logits >= 0
+        if deterministic
+        else jax.random.bernoulli(rng, jax.nn.sigmoid(logits))
+    )
+    log_prob, _ = evaluate_bernoulli(logits, action)
+    return action, log_prob
+
+
 def sample_action(rng, out, discrete: bool, deterministic: bool, action_mask=None):
     """Sample (or take the mode of) the policy at `out`, the actor's output.
     Returns `(action, log_prob)`; the log-prob of a continuous action is summed

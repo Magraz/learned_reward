@@ -41,6 +41,7 @@ _ENV_KEYS = {
     "observation",
     "reward",
     "pois",
+    "global_state",
 }
 # Keys of a rover `env:` group that the training runners read and the env does
 # not: `n_envs` is the vmap width of the JAX collectors (`mappo_jax`,
@@ -78,7 +79,11 @@ def make_rover_env(env_cfg):
     if unknown:
         raise ValueError(f"unknown dynamics keys {sorted(unknown)}; allowed {sorted(_DYNAMICS_KEYS)}")
 
-    kwargs = {k: cfg[k] for k in ("world_size", "spawn_region", "max_steps") if k in cfg}
+    kwargs = {
+        k: cfg[k]
+        for k in ("world_size", "spawn_region", "max_steps", "global_state")
+        if k in cfg
+    }
     return BaseRoverEnv(
         n_agents=cfg["n_agents"],
         pois=_build_component(POI_MODELS, cfg["pois"], "static", "pois"),

@@ -70,7 +70,9 @@ class SectorDensityObservation(ObservationModel):
         weight = 1.0 - dist / radius
         return jnp.einsum("ans,an->as", onehot, weight) / max(total, 1)
 
-    def __call__(self, env, state):
+    def __call__(self, env, state, poi_mask=None):
+        """``poi_mask`` (P,) bool: when given, a POI where it is false is
+        hidden from every rover as well (see ``BaseRoverEnv.observe``)."""
         pos = state.rovers.position
         heading = state.rovers.heading
         n_agents = pos.shape[0]
@@ -83,7 +85,10 @@ class SectorDensityObservation(ObservationModel):
         pois = state.pois
         n_pois = pois.position.shape[0]
         rel_ap = pois.position[None, :, :] - pos[:, None, :]  # (A, P, 2)
-        available = jnp.broadcast_to(visible(pois), (n_agents, n_pois))
+        shown = visible(pois)
+        if poi_mask is not None:
+            shown = shown & poi_mask
+        available = jnp.broadcast_to(shown, (n_agents, n_pois))
         poi_block = self.presence(rel_ap, available, heading, R, n_pois)
 
         return jnp.concatenate([agents, poi_block], axis=1)

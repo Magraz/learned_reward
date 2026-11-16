@@ -220,7 +220,8 @@ or `evaluate()`.
   - `conf/env/rover_*.yaml` (5 variants, see the rover section);
   - `conf/model/mlp.yaml` (`mappo_jax`), `conf/model/{rmappo,mappo_mlp}.yaml`
     and their `_diffrew` twins (`rmappo_jax`; the twins also set
-    `env.reward.mode: difference_rewards`). Each stack rejects the other's groups with a `TypeError`
+    `env.reward.mode: difference_rewards`), and `conf/model/rmappo_manager.yaml`
+    (`rmappo` plus the POI manager, see the rmappo_jax section). Each stack rejects the other's groups with a `TypeError`
     before any results directory is created;
   - `conf/seeds/standard.yaml`;
   - `conf/hydra/launcher/joblib_auto.yaml`.
@@ -378,11 +379,17 @@ Cell 0 defines `load_reward_runs(batches)` and
 mean over trials at each exact `total_steps`. Both reward figures use them.
 - **Single reward plot (cell 1):** every batch in `batches` on one axis.
 - **Multi-batch reward grid (cell 2):** one subplot per batch in
-  `multi_batches`, up to 3 columns, the same `experiments` and `trials` in each,
+  `multi_batches`, filled row by row, the same `experiments` and `trials` in each,
   one shared legend. Each experiment keeps one color across subplots, assigned
   by its position in `experiments`; `plot_colors` can override it by experiment
   name (a `batch/experiment` key has no effect here). The cell prints a table
   of the trials found. Skipped if `multi_batches` is absent.
+  - `multi_batches_n_columns` (added 2026-11-13, currently 4): the number of
+    columns. The rows follow: the fewest that hold every batch (48 batches at
+    4 columns: 12 rows). Absent or `null`: `ceil(sqrt(n))` columns. Capped at
+    the number of batches; anything but a positive integer raises a
+    `ValueError`. 4 puts one family (base, `_hidden`, `_ord`, `_ord_hidden`)
+    on each row, as `multi_batches` lists them.
   - `multi_batches_share_y_axis` (added 2026-11-09, default `false`): `true`
     gives every subplot the same y range, covering every batch's curves and
     `max_rew_possible` line. Only the first column then keeps y tick labels.
@@ -396,10 +403,12 @@ mean over trials at each exact `total_steps`. Both reward figures use them.
     without an entry (or with `null`) gets no line, and the cell prints it. A
     list raises a `TypeError`. The config holds every `ROUTE_PLANS` group's
     mean scripted return over seeds 0-999 (`scripted_steps --n-seeds 1000`,
-    2026-11-09). For a solved group that is the sum of POI values; for an
+    2026-11-09; the 16 `rover_<n>a_16poi_c<n>_grid*` groups added
+    2026-11-12). For a solved group that is the sum of POI values; for an
     unsolved one it is the best plan found, not a proven maximum.
   - Cell 0 holds the helpers both grids use (here and in cell 3):
-    `make_multi_batch_grid` (the figure and its axes), `max_rewards_by_batch`
+    `multi_batch_grid_shape` (rows and columns), `make_multi_batch_grid` (the
+    figure and its axes), `max_rewards_by_batch`
     and `draw_max_reward`.
 - **Reward by update (cell 3):** both figures again with the PPO update number
   on the x axis. `load_reward_runs` adds an `update` column (the row position:
@@ -419,15 +428,18 @@ mean over trials at each exact `total_steps`. Both reward figures use them.
   2026-11-09).** Tiles the `trajectory_seed<k>.png` figures that `view=true`
   (or `scripts/view_results.sh`) left in each run's `logs/rover/`. It writes
   one figure per experiment, trial and episode, with one panel per batch of
-  `multi_batches`, in that order, using `ceil(sqrt(n))` columns, the reward
-  grid's layout. Each panel is titled with its batch and its
+  `multi_batches`, in that order, in the reward grid's layout
+  (`multi_batches_n_columns` columns; its `grid_shape` mirrors the notebook's
+  `multi_batch_grid_shape`). Each panel is titled with its batch and its
   `max_rew_possible`, because the figure's own title names only the model
   group and prints "return x of <sum of POI values>". Episode k is the run's
   k-th seed (= the trial's seed + k), the same seed in every panel.
-  - It reads `base_path`, `multi_batches`, `experiments`, `trials`,
-    `max_rew_possible` and `custom_labels` from the config.
+  - It reads `base_path`, `multi_batches`, `multi_batches_n_columns`,
+    `experiments`, `trials`, `max_rew_possible` and `custom_labels` from the
+    config.
   - Flags: `--experiments`, `--trials` (default: config trials with at least
-    one figure on disk), `--episodes` (default `1 2 3`), `--columns`,
+    one figure on disk), `--episodes` (default `1 2 3`), `--columns`
+    (overrides `multi_batches_n_columns`),
     `--out-dir` (default `plotting/rover/learned_trajectories/`, git-ignored
     like every PNG) and `--dpi` (220).
   - A run without the figure gets an empty "no figure" panel. A figure older
@@ -715,6 +727,60 @@ uv run python train.py algorithm=rmappo_jax env=rover_2poi_c2 model=mappo_mlp tr
   recurrent policy, the convolutional (CNN) base, stacked frames,
   other action spaces, `weight_decay`, Xavier init, SMAC-specific options.
 
+**Learned POI manager (`manager.py`, added 2026-11-16; not on-policy's).**
+`params.use_poi_manager: true` (model group `rmappo_manager`) adds a learner
+that decides, every step, which POIs every rover senses.
+```
+uv run python train.py algorithm=rmappo_jax env=rover_2a_3poi_c2_implicit_gs model=rmappo_manager trial_id=0
+```
+- **Input:** the env's global state, so the env group needs
+  `env.global_state: true` (see the rover section); `validate` raises
+  otherwise and with `use_proper_time_limits`.
+- **Action:** one independent Bernoulli show/hide output per POI, with
+  `n_pois` logits and no enumerated pattern table or eight-POI cap.
+  The binary mask goes to every rover through
+  `env.observe(state, poi_mask)`, on top of the POIs' own hiding flags. Hidden
+  POIs still pay; only the observation changes.
+- **Order within a step** (`trainer._env_step`): global state from the true
+  state → the manager samples a mask → the rovers' observation is rebuilt
+  under it → the rovers act on that observation, which is what `Transition.obs`
+  stores.
+- **Training:** a feedforward actor and critic (`manager_config`: the run's
+  config with `use_recurrent_policy: false`), trained on the team reward by
+  the same `mappo.ppo_update` as one agent per env, from the same rollouts,
+  right after the rovers' update. Every hyperparameter (learning rates, 15
+  epochs, clip, entropy 0.01, ValueNorm, Huber, γ, λ, hidden 64) is the
+  rovers'. PPO uses the sum of the per-POI log probabilities and entropies;
+  stored manager actions have shape `(T, B, 1, n_pois)`.
+- **Start:** each Bernoulli logit's bias is `manager_init_bias` (default 3.0).
+  At the start each POI is shown independently with probability near
+  sigmoid(3.0) = 0.95, so every POI is
+  shown with probability 0.95^P (0.86 at 3 POIs, 0.82 at 4, 0.75 at 6), and
+  0.95 · P POIs are shown on average (2.86 measured at 3, 5.71 at 6): close
+  to a run without a manager, less so as P grows.
+- **Keys:** `fold_in(..., 1)` of the rovers' init, action and update keys, so
+  the rovers' key chains are those of a run without the manager.
+- **State and files:** `RMAPPOTrainState.manager` holds the manager's train
+  state (`None` without one). The saved params and the train checkpoint gain a
+  `manager` entry, so resume and `evaluate=true` restore it. Evaluation takes
+  the most likely mask (show when the POI logit is nonnegative).
+  Old categorical-manager checkpoints are incompatible with the new head.
+  `META_FIELDS` is unchanged, so the manager's settings are not checked on resume.
+- **Logged** every update, next to the rovers' losses: `manager_policy_loss`,
+  `manager_value_loss`, `manager_dist_entropy` (entropy of the pattern
+  distribution, in nats; ln 8 = 2.08 is uniform over 3 POIs' patterns),
+  `manager_explained_variance` and the other `ppo_update` metrics with a
+  `manager_` prefix. `manager_pois_shown` is the mean number of POIs shown per
+  step over the rollout, i.e. how much the manager hides.
+- `view=true` raises `NotImplementedError` with the manager on: the view
+  rollout passes the policy observations only.
+- Original categorical version smoke-verified 2026-11-16 (CPU,
+  `rover_2a_3poi_c2_implicit_gs`, 2 updates):
+  trains, resumes one more update with `checkpoint=true`, evaluates;
+  `manager_pois_shown` 2.86 at the first update. Bernoulli coverage is in
+  `algorithms/tests/test_poi_manager.py`: joint probabilities, entropy,
+  gradients, sampling, and 16-POI collection/update/evaluation. **No training result.**
+
 **Before comparing with `mappo_jax`:** a gap mixes hyperparameters with
 implementation. On groups that do not set `n_steps` (all rover groups) the
 batch is 200 × 32 = 6,400 env steps against `mappo_jax`'s 1048 × 32 = 33,536,
@@ -783,8 +849,30 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
     without it an old policy loads and is scored silently under the new
     observation. The results have not been moved (the author's choice,
     2026-11-04).
-  - No global-state hook: the critic reads the concatenated observations
-    (64 dims at 4 rovers).
+  - **Global state (`env.global_state`, added 2026-11-16).** Off by default
+    (base group `false`): there is no global-state hook, and the critic reads
+    the concatenated observations (64 dims at 4 rovers). `true`:
+    `BaseRoverEnv` publishes `global_state(state)` and `global_state_dim =
+    2 * n_agents + 3 * n_pois`, i.e. rover positions and POI positions (each
+    divided by the arena size) and each POI's `remaining / value`, all in
+    [0, 1]. The attributes exist only under the flag, because both stacks
+    detect the hook with `hasattr` (`mappo_jax.trainer.global_state_fn`). The
+    critic of both stacks then reads it, every POI included, hidden or not.
+    The `rmappo_jax` POI manager requires it. It is not in the results path,
+    so the flag has its own groups: **`<parent>_gs` (56 groups, 2026-11-16)**
+    inherits `<parent>` and sets only `global_state: true`. Each composes to
+    exactly its parent's config plus that key, and shares its parent's
+    `ROUTE_PLANS` entry and return floor (`policies.plan_parent`). The parents
+    are the base, `_hidden`, `_ord` and `_ord_hidden` groups of 14 families:
+    - `rover_1a_3poi_c1_implicit012` and `rover_2a_3poi_c2_implicit`
+      (`rover_2a_3poi_c2_implicit_gs`, 13 values, was the first);
+    - `rover_<n>a_16poi_c<n>_grid`;
+    - `rover_<n>a_6poi_c<n>_implicit_26x26`;
+    - `rover_<n>a_4poi_c<n>_implicit_20x20`.
+
+    The last three families are for n = 1, 2, 4, 6. The 16 grid `_gs` groups
+    have 16 POIs and also support `model=rmappo_manager`, whose Bernoulli
+    head has one output per POI.
   - `view=true` writes the arena and trajectory PNGs (see JAX MAPPO).
   - **Smoke result (2026-10-27, 128k steps = 20 updates):** `rmappo` reached
     deterministic eval 2.00 of 2.00 (0.01 untrained, 1.81 at update 10).
@@ -1179,7 +1267,10 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   `_ord_hidden` group its `_ord` group's, a plain `_hidden` group
   (`enforce_order: false`) its unordered group's, since its order locks
   nothing. The scripted rovers read the true state, so hiding changes nothing
-  for them; each `_hidden` group scores exactly its parent's numbers. A rover
+  for them; each `_hidden` group scores exactly its parent's numbers. A
+  `<name>_gs` group (global state published) likewise reuses `<name>`'s plan;
+  `policies.plan_parent` strips `_gs`, then `_hidden`, for the plans and the
+  tests' return floors. A rover
   whose target is locked parks there and waits. Tests check that every
   `conf/env/rover_*.yaml` has a plan (all 89 on 2026-11-11), that every plan
   names a current group, and run every plan, so a new, renamed or deleted
@@ -1237,6 +1328,7 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   | `rover_4a_4poi_c1234_ord` (`_hidden`) | 1 × 0→3, 2 × 1→2→3, 1 × 2→3 | 67 (65–71) |
   | `rover_6a_6poi_c3` (two rings, 2026-11-05) (`_hidden`) | 3 × 2(→0), 3 × 3→4→5→1 | never solved: return 4.38 (4.31–4.44) of 6 |
   | `rover_6a_6poi_c3_ord` (`_hidden`) (2026-11-06) | 3 × 3→5(→2), 3 × 4→0(→1) | never solved: return 3.62 (3.59–3.66) of 6 |
+  | `rover_<n>a_16poi_c<n>_grid` for n = 1, 2, 4, 6 (each with `_ord`, `_hidden`, `_ord_hidden`; measured 2026-11-12) | n × 10→5→2→7→15→13→8→0→… (value-5 POIs first) | never solved: mean return 16.15 / 16.00 / 15.87 / 15.81 of 48 |
   | `rover_16a_6poi_c844844` | 4 × 0→2, 4 × 0→1, 4 × 3→5, 4 × 3→4 | 34 (32–37) |
   | `rover_16a_6poi_c844844_ord` (`_hidden`) | same | 44 (42–47) |
   | `rover_6a_3poi_c3_implicit` | 3 × 2→0, 3 × 1 | never solved: return 7.89 (7.79–7.98) of 10 |
@@ -1475,9 +1567,12 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   (multi-agent particle environment) demo with random actions; it is not part
   of the rover domain and nothing imports it. It is the only remaining user of
   the `jaxmarl` package.
-- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (153 tests,
-  CPU; on 2026-11-11, 22 fail on stale variant names (`rover_2poi_c2`,
-  `rover_4poi_c1234`), see Loose ends; all 89 route-plan tests pass).
+- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (209 tests
+  with the 56 `_gs` groups, CPU; on 2026-11-16, 22 fail on stale variant
+  names (19 `rover_2poi_c2`, 3 `rover_4poi_c1234`), see Loose ends; every
+  route-plan test passes, the 56 `_gs` ones included).
+  `algorithms/tests/test_rover_trained_view.py`'s 3 tests fail the same way
+  (`rover_2poi_c2`).
   `algorithms/tests/test_reward_base.py` (12 tests, CPU, all pass): the base
   config is `None` for one-order layouts; for `rover_4a_2poi_c2_ord`,
   `_ord_hidden` and `rover_4a_4poi_c1234_hidden` it builds, without warnings,

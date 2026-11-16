@@ -31,7 +31,7 @@ One update, in on-policy's order:
      ValueNorm still see one value per (env, agent) row, as on-policy's.
 """
 
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -40,7 +40,7 @@ from flax.training.train_state import TrainState
 
 from algorithms.mappo_jax.mappo import compute_gae
 from algorithms.rmappo_jax import value_norm as vn_lib
-from algorithms.rmappo_jax.network import evaluate_action, make_networks
+from algorithms.rmappo_jax.network import evaluate_action, evaluate_bernoulli, make_networks
 from algorithms.rmappo_jax.types import RMAPPOConfig, Transition
 
 ADVANTAGE_EPS = 1e-5  # R_MAPPO.train: (adv - mean) / (std + 1e-5)
@@ -50,6 +50,10 @@ class RMAPPOTrainState(NamedTuple):
     actor_ts: TrainState
     critic_ts: TrainState
     value_norm: vn_lib.ValueNormState
+    # The POI manager's own train state (`manager.py`), or None without one
+    # (an empty pytree, so jit and the runner loop are unaffected).
+    # `ppo_update` returns a state without it; `trainer.update_fn` re-attaches.
+    manager: Optional["RMAPPOTrainState"] = None
 
 
 def zero_hidden(config: RMAPPOConfig, batch_shape) -> jnp.ndarray:
@@ -294,11 +298,15 @@ def ppo_update(
     last_value: jnp.ndarray,
     config: RMAPPOConfig,
     discrete: bool,
+    *,
+    multi_binary: bool = False,
 ):
     """One `R_MAPPO.train` call. Returns the new train state and the metrics,
     averaged over epochs x minibatches like on-policy's `train_info`. The actor
     trains on (env, agent) sequences, the critic on per-env ones, each from its
     own permutation, in the same `n_minibatches`.
+    `multi_binary` treats actor logits as independent Bernoullis for the POI
+    manager, with one joint log-probability and summed entropy per mask.
     """
     advantages, returns, explained_variance = prepare_advantages(
         trajectory, last_value, train_state.value_norm, config
@@ -319,9 +327,12 @@ def ppo_update(
 
     def _actor_loss(params, batch):
         out = unroll(actor_apply, params, batch["obs"], batch["actor_h0"], batch["mask"])
-        log_prob, entropy = evaluate_action(
-            out, batch["action"], discrete, batch["action_mask"]
-        )
+        if multi_binary:
+            log_prob, entropy = evaluate_bernoulli(out, batch["action"])
+        else:
+            log_prob, entropy = evaluate_action(
+                out, batch["action"], discrete, batch["action_mask"]
+            )
         policy_loss, dist_entropy, ratio = policy_objective(
             log_prob,
             batch["old_log_prob"],

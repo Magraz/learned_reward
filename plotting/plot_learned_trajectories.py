@@ -5,10 +5,12 @@
 three deterministic episodes, at seeds = the trial's seed + 1, 2, 3.
 
 This script reads `plotting/config.yaml` (`base_path`, `multi_batches`,
-`experiments`, `trials`, `max_rew_possible`, `custom_labels`) and, for every
+`multi_batches_n_columns`, `experiments`, `trials`, `max_rew_possible`,
+`custom_labels`) and, for every
 experiment and trial, writes one figure per episode: one panel per batch of
-`multi_batches`, in that order, filled row by row with ceil(sqrt(n)) columns,
-the layout of the notebook's multi-batch reward grid. The k-th episode of a
+`multi_batches`, in that order, filled row by row with
+`multi_batches_n_columns` columns (default ceil(sqrt(n))), the layout of the
+notebook's multi-batch reward grid. The k-th episode of a
 trial has the same seed in every run, since a trial's seed comes from the
 shared seed list.
 
@@ -55,7 +57,9 @@ def parse_args():
         help="1-based episode index within a run, in seed order (default: 1 2 3)",
     )
     parser.add_argument(
-        "--columns", type=int, help="default: ceil(sqrt(number of batches))"
+        "--columns",
+        type=int,
+        help="default: the config's multi_batches_n_columns, else ceil(sqrt(number of batches))",
     )
     parser.add_argument(
         "--out-dir", type=Path, default=PLOTTING_DIR / "rover" / "learned_trajectories"
@@ -90,8 +94,16 @@ def saved_model(run):
 
 
 def grid_shape(n_panels, n_cols=None):
-    """(n_rows, n_cols); ceil(sqrt(n)) columns, as the notebook's make_multi_batch_grid."""
-    n_cols = n_cols or math.ceil(math.sqrt(n_panels))
+    """(n_rows, n_cols), as the notebook's multi_batch_grid_shape.
+
+    n_cols None means ceil(sqrt(n_panels)); it is capped at n_panels, and the
+    rows are the fewest that hold every panel.
+    """
+    if n_cols is None:
+        n_cols = math.ceil(math.sqrt(n_panels))
+    elif not isinstance(n_cols, int) or isinstance(n_cols, bool) or n_cols < 1:
+        raise ValueError(f"the number of columns must be a positive integer, got {n_cols!r}")
+    n_cols = min(n_cols, n_panels)
     return math.ceil(n_panels / n_cols), n_cols
 
 
@@ -142,6 +154,7 @@ def main():
     trials = args.trials or [str(t) for t in config["trials"]]
     max_rewards = config.get("max_rew_possible") or {}
     labels = config.get("custom_labels") or {}
+    n_cols = args.columns or config.get("multi_batches_n_columns")
 
     written, missing, stale = [], [], []
     for experiment in experiments:
@@ -176,7 +189,7 @@ def main():
                 )
                 out_path = args.out_dir / f"{experiment}_trial{trial}_episode{episode}.png"
                 plot_episode_grid(
-                    batches, panels, title, max_rewards, args.columns, out_path, args.dpi
+                    batches, panels, title, max_rewards, n_cols, out_path, args.dpi
                 )
                 written.append(out_path)
                 print(out_path)

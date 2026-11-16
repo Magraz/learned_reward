@@ -19,6 +19,7 @@ from flax.serialization import from_bytes, msgpack_restore, to_bytes
 
 from algorithms.mappo_jax.run import MAPPO_JAX_Runner, make_base_env, make_env
 from algorithms.mappo_jax.trainer import global_state_dim
+from algorithms.rmappo_jax.manager import init_manager
 from algorithms.rmappo_jax.mappo import (
     RMAPPOTrainState,
     create_train_state,
@@ -134,6 +135,11 @@ class RMAPPO_JAX_Runner(MAPPO_JAX_Runner):
             f"centralized input: gs_dim={global_state_dim(self.env)} "
             f"(env hook: {hasattr(self.env, 'global_state')})"
         )
+        if config.use_poi_manager:
+            print(
+                f"  poi_manager=on | {self.env.n_pois} Bernoulli show/hide outputs "
+                f"| init logit bias {config.manager_init_bias} per POI"
+            )
         self._print_base_env()
 
     def _make_train(self, env=None):
@@ -143,17 +149,29 @@ class RMAPPO_JAX_Runner(MAPPO_JAX_Runner):
         return self.config.eval_interval
 
     def _view_policy(self, train_state):
+        if self.config.use_poi_manager:
+            # rollout_view_policy hands the policy observations only, and the
+            # manager needs the state; rendering it is not implemented.
+            raise NotImplementedError("view=true is not implemented with use_poi_manager")
         return RecurrentViewPolicy(train_state, self.env, self.config)
 
     # ------------------------------------------------------------------ io
 
     @staticmethod
     def _params_tree(train_state: RMAPPOTrainState) -> dict:
-        return {
+        tree = {
             "actor": train_state.actor_ts.params,
             "critic": train_state.critic_ts.params,
             "value_norm": train_state.value_norm,
         }
+        manager = train_state.manager
+        if manager is not None:
+            tree["manager"] = {
+                "actor": manager.actor_ts.params,
+                "critic": manager.critic_ts.params,
+                "value_norm": manager.value_norm,
+            }
+        return tree
 
     def save_params(self, train_state, path):
         with open(path, "wb") as f:
@@ -166,7 +184,7 @@ class RMAPPO_JAX_Runner(MAPPO_JAX_Runner):
 
     def _checkpoint_tree(self, runner_state, eval_rng) -> dict:
         ts = runner_state.train_state
-        return {
+        tree = {
             "actor_ts": ts.actor_ts,
             "critic_ts": ts.critic_ts,
             "value_norm": ts.value_norm,
@@ -174,6 +192,13 @@ class RMAPPO_JAX_Runner(MAPPO_JAX_Runner):
             "eval_rng": eval_rng,
             "config_meta": self._config_meta(),
         }
+        if ts.manager is not None:
+            tree["manager"] = {
+                "actor_ts": ts.manager.actor_ts,
+                "critic_ts": ts.manager.critic_ts,
+                "value_norm": ts.manager.value_norm,
+            }
+        return tree
 
     def _check_config_meta(self, raw: dict, path):
         meta, stored = self._config_meta(), raw.get("config_meta")
@@ -202,10 +227,18 @@ class RMAPPO_JAX_Runner(MAPPO_JAX_Runner):
         self._check_config_meta(msgpack_restore(data), path)
         loaded = from_bytes(self._checkpoint_tree(runner_state, eval_rng), data)
         print(f"Train state loaded from {path} (episodes restart from reset)")
+        manager = None
+        if "manager" in loaded:
+            manager = RMAPPOTrainState(
+                actor_ts=loaded["manager"]["actor_ts"],
+                critic_ts=loaded["manager"]["critic_ts"],
+                value_norm=loaded["manager"]["value_norm"],
+            )
         train_state = RMAPPOTrainState(
             actor_ts=loaded["actor_ts"],
             critic_ts=loaded["critic_ts"],
             value_norm=loaded["value_norm"],
+            manager=manager,
         )
         return (
             runner_state._replace(train_state=train_state, rng=loaded["rng"]),
@@ -225,14 +258,29 @@ class RMAPPO_JAX_Runner(MAPPO_JAX_Runner):
             # Must match training, or the restored critic head won't fit.
             n_critic_outputs=n_critic_outputs(self.env),
         )
+        if self.config.use_poi_manager:
+            train_state = train_state._replace(
+                manager=init_manager(
+                    jax.random.PRNGKey(0), self.config, self.env, num_updates=1
+                )
+            )
         path = self.dirs["models"] / "models_finished.msgpack"
         if not path.exists():
             path = self.dirs["models"] / "models_checkpoint.msgpack"
         with open(path, "rb") as f:
             params = from_bytes(self._params_tree(train_state), f.read())
         print(f"Params loaded from {path}")
-        return RMAPPOTrainState(
-            actor_ts=train_state.actor_ts.replace(params=params["actor"]),
-            critic_ts=train_state.critic_ts.replace(params=params["critic"]),
-            value_norm=params["value_norm"],
-        )
+
+        def restore(template: RMAPPOTrainState, saved: dict) -> RMAPPOTrainState:
+            return RMAPPOTrainState(
+                actor_ts=template.actor_ts.replace(params=saved["actor"]),
+                critic_ts=template.critic_ts.replace(params=saved["critic"]),
+                value_norm=saved["value_norm"],
+            )
+
+        restored = restore(train_state, params)
+        if train_state.manager is not None:
+            restored = restored._replace(
+                manager=restore(train_state.manager, params["manager"])
+            )
+        return restored

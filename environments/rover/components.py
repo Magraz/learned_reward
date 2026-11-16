@@ -44,7 +44,10 @@ class ObservationModel(abc.ABC):
 
     @abc.abstractmethod
     def __call__(self, env, state: RoverEnvState) -> jax.Array:
-        """(n_agents, obs_dim) observations of ``state``."""
+        """(n_agents, obs_dim) observations of ``state``. A model that can
+        hide POIs also takes ``poi_mask`` ((P,) bool, false = hidden from
+        every rover), which ``BaseRoverEnv.observe`` passes only when one is
+        given; the ``rmappo_jax`` POI manager needs it."""
 
 
 @dataclasses.dataclass(frozen=True)
