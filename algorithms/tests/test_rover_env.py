@@ -554,9 +554,14 @@ def test_hide_when_used_up_defaults_off_in_every_variant_and_an_entry_overrides_
     np.testing.assert_array_equal(pois.hide_when_used_up, [True, False])
     with pytest.raises(ValueError, match="hide_when_used_up must be true or false"):
         make_env(entries=[{"position": [5.0, 5.0], "coupling": 1, "hide_when_used_up": 1}])
+    # Off everywhere except the `_hidden` groups, which set it in their
+    # `_ord_hidden` ancestor (since 2026-11-17).
     for variant in list_variants():
         _, state = load_rover_env(variant).reset(jax.random.PRNGKey(0))
-        assert not state.pois.hide_when_used_up.any(), variant
+        if "_hidden" in variant:
+            assert state.pois.hide_when_used_up.all(), variant
+        else:
+            assert not state.pois.hide_when_used_up.any(), variant
 
 
 def test_used_up_pois_change_the_observation_only_once_used_up():

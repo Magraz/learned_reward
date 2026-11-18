@@ -107,6 +107,21 @@ renders; `mappo_jax` with `model=mlp` trains and renders.
   group grew from radius 0.6 / 0.3 to 0.75 / 0.5; their runs on disk used the
   old radii. Retraining writes into the same results directories, where
   `checkpoint=true` skips the old runs as finished: move them first.
+- **Every `_hidden` run on disk predates `hide_when_used_up: true`
+  (2026-11-17).** That day every `_hidden` group (all 70: `_ord_hidden`,
+  plain `_hidden`, and their `_gs` children, through the 23 `_ord_hidden`
+  files they all inherit) started hiding used-up POIs. Every run before
+  then, about 1,475 trial directories in 34 groups, trained with them
+  sensed. The results were left in place (the author's choice). So:
+  - `checkpoint=true` skips those runs as finished;
+  - `evaluate=true` and `view=true` on one of them need
+    `env.pois.hide_when_used_up=false` on the command line
+    (`scripts/view_results.sh` cannot pass it). Without it the old policies
+    are scored silently under the new observation, which has the same width;
+  - every measured `_hidden` / `_ord_hidden` result in this file is the
+    used-up-visible version.
+
+  Not smoke-run or tested after the change (the author's request).
 - **`rover_6a_6poi_c3` moved to two rings (2026-11-05).** Before: six POIs at
   rate 0.1 on one radius-3.5 ring in a 10×10 arena. Now: a 14×14 arena
   centred on (7, 7), three slow POIs (0.01) on an inner radius-2.5 ring and
@@ -779,7 +794,37 @@ uv run python train.py algorithm=rmappo_jax env=rover_2a_3poi_c2_implicit_gs mod
   trains, resumes one more update with `checkpoint=true`, evaluates;
   `manager_pois_shown` 2.86 at the first update. Bernoulli coverage is in
   `algorithms/tests/test_poi_manager.py`: joint probabilities, entropy,
-  gradients, sampling, and 16-POI collection/update/evaluation. **No training result.**
+  gradients, sampling, and 16-POI collection/update/evaluation.
+- **First result (analysed 2026-11-17), `rover_2a_3poi_c2_implicit_gs`, 10
+  trials, 10M steps.** Final return (mean evaluation over the last 10% of
+  updates; maximum 6.0): `rmappo_manager` 3.60-4.80 (mean 4.28), every
+  other arm 2.13-2.40 on `_gs` (`rmappo` trial 2 stopped at 6.3M steps) and
+  2.71-2.97 (arm means) on `_hidden`. The saved heads are Bernoulli (3
+  logits). Replays (64 deterministic episodes per trial) reproduce the
+  logged returns.
+  - **The order is not the optimal one.** Every trial goes to POI 1 (the
+    nearest, the trap) first. Then trials 3, 6 and 9 take 1→2 (4.80, the
+    scripted ceiling for that order), trials 0, 1 and 4 take 1→0→2 (4.56-4.75,
+    scripted 5.29) and trials 2, 5, 7 and 8 take 1→0 and stop (3.60). None
+    takes 0→1→2 (scripted 6.00, the only order that uses everything up).
+    Each trial's order is fixed within its first 0.3-2.6M steps.
+  - **What the manager does:** once POI 1 is used up it hides it (shown on
+    0-5% of steps) and in the 1→2 and 1→0→2 trials shows exactly one
+    remaining POI (pattern 001 or 100 on 95-100% of travel steps). The rovers
+    leave within 2 steps and reach the next POI at near full speed. Its input
+    holds the budgets; the rovers' observation does not.
+  - **Without it:** every `_gs` arm uses POI 1 up at step 31 and parks
+    there, the base group's behaviour, so the global-state critic alone
+    changes nothing. `_hidden` reveals the optimal order, but used-up POIs
+    stay sensed: after POI 0 runs out (step 22) the rovers stay inside it
+    15-24 more steps, and POI 1 is used up in only 35-49% of episodes, too
+    late for POI 2.
+  - Untested explanation for the `_hidden` gap: its used-up POI stays
+    visible, while the manager shows a single target. Since 2026-11-17 the
+    `_hidden` groups hide used-up POIs, so retraining
+    `rover_2a_3poi_c2_implicit_hidden` (after moving its old runs) tests
+    it. The replay scripts are not
+    in the repository.
 
 **Before comparing with `mappo_jax`:** a gap mixes hyperparameters with
 implementation. On groups that do not set `n_steps` (all rover groups) the
@@ -924,7 +969,9 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
     - `hide_when_used_up: true` (POI key: a `pois:` block default that an
       entry overrides; the base group sets `false`) hides a POI once it is
       used up. That was the only rule before 2026-11-04 (see the ⚠ above on
-      the runs on disk).
+      the runs on disk). Since 2026-11-17 every `_hidden` group sets it (see
+      `_ord_hidden` below), so there a rover senses only POIs that can
+      still pay.
   - Locked POIs (see Temporal coupling) are sensed like unlocked ones, so the
     observation does not say which POIs can pay yet, unless the POI sets
     `hide_until_unlocked` (see Temporal coupling).
@@ -1027,9 +1074,13 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
       `rover_4a_2poi_c2_ord_hidden`, `rover_4a_4poi_c1234_ord_hidden`,
       `rover_6a_6poi_c3_ord_hidden`, `rover_16a_2poi_c8_ord_hidden`,
       `rover_16a_6poi_c844844_ord_hidden`. Each inherits its `_ord` group and
-      sets only `pois.hide_until_unlocked: true`; each composes to exactly its
-      parent's config plus that key, builds without warnings, and hides at
-      reset every POI above the lowest order.
+      sets only `pois.hide_until_unlocked: true` and, since 2026-11-17,
+      `pois.hide_when_used_up: true`; it hides at reset every POI above the
+      lowest order, and every POI once it is used up. Every plain `_hidden`
+      group inherits an `_ord_hidden` group, and every `_hidden_gs` /
+      `_ord_hidden_gs` group inherits its parent, so both flags reach all 70
+      `_hidden` groups from these files. Its runs on disk predate the second
+      flag (see Loose ends).
     - ⚠ **Where hiding acts.** Over 8 scripted-team episodes per group, the
       observation differed from the parent's on 129 steps
       (`rover_4a_2poi_c2_ord_hidden`, global sensing) and 494
@@ -1589,7 +1640,7 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   budget while the hidden POI pays; the scripted team returns to index
   order; the three warnings. Used-up POIs: sensed
   exactly like live ones by default and gone under `hide_when_used_up`; the
-  flag off in every variant, its per-entry override and a non-boolean value
+  flag on in every `_hidden` variant and off in every other, its per-entry override and a non-boolean value
   rejected; over a jitted episode of `rover_4a_2poi_c2_ord`, the default and
   the old rule observe the same until a POI is used up and differ after.
   Hiding: the flag's default and per-entry override; a flagged POI absent

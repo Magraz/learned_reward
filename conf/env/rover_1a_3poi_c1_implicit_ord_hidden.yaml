@@ -8,3 +8,4 @@ defaults:
 env:
   pois:
     hide_until_unlocked: true
+    hide_when_used_up: true     # and hidden again once used up (since 2026-11-17)
