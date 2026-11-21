@@ -18,11 +18,12 @@ import numpy as np
 from flax.serialization import from_bytes, msgpack_restore, to_bytes
 
 from algorithms.mappo_jax.run import MAPPO_JAX_Runner, make_base_env, make_env
-from algorithms.mappo_jax.trainer import global_state_dim
-from algorithms.rmappo_jax.manager import init_manager
+from algorithms.mappo_jax.trainer import global_state_dim, global_state_fn
+from algorithms.rmappo_jax.manager import init_manager, observe_with_manager
 from algorithms.rmappo_jax.mappo import (
     RMAPPOTrainState,
     create_train_state,
+    denormalize_values,
     zero_hidden,
 )
 from algorithms.rmappo_jax.trainer import (
@@ -48,38 +49,92 @@ META_FIELDS = (
 
 
 class RecurrentViewPolicy:
-    """`view()`'s deterministic policy, carrying the GRU hidden state across the
-    decisions of one rendered episode (the `StatelessViewPolicy` interface)."""
+    """`view()`'s policy, carrying the GRU hidden state across the decisions of
+    one rendered episode (the `StatelessViewPolicy` interface, including its
+    `deterministic` and `seed`)."""
 
-    def __init__(self, train_state, env, config):
+    def __init__(self, train_state, env, config, deterministic=True, seed=0):
         discrete = getattr(env, "discrete", False)
         n_agents, obs_dim = env.n_agents, env.observation_dim
         self._initial_hidden = zero_hidden(config, (1, n_agents))
 
         @jax.jit
-        def act(obs, hidden, mask):
+        def act(obs, hidden, mask, key):
+            key, action_key = jax.random.split(key)
             actions, _, hidden = actor_step(
                 train_state.actor_ts.apply_fn,
                 train_state.actor_ts.params,
                 obs.reshape(1, n_agents, obs_dim),
                 hidden,
                 jnp.ones((1,)),
-                jax.random.PRNGKey(0),
+                action_key,
                 discrete,
-                deterministic=True,
+                deterministic=deterministic,
                 action_mask=None if mask is None else mask.reshape(1, n_agents, -1),
             )
-            return actions[0], hidden
+            return actions[0], hidden, key
 
         self._act = act
+        self._key = jax.random.PRNGKey(seed)
         self.reset()
 
     def reset(self):
         self._hidden = self._initial_hidden
 
-    def __call__(self, obs, mask=None):
-        actions, self._hidden = self._act(obs, self._hidden, mask)
+    def __call__(self, obs, mask=None, state=None):
+        actions, self._hidden, self._key = self._act(
+            obs, self._hidden, mask, self._key
+        )
         return actions
+
+
+class ManagedViewPolicy:
+    """`view()`'s policy with the POI manager, in evaluation's order.
+
+    Every decision, the manager picks a mask from the global state of `state`,
+    the rovers' observation is rebuilt under that mask, and the rovers'
+    `RecurrentViewPolicy` acts on it. Deterministic (default), the manager
+    takes its most likely mask (a POI is shown when its logit is nonnegative);
+    sampled, it draws one, from its own key chain (`seed` folded with 1, as
+    training folds the rovers' action key). The decision's mask `(P,)` is left
+    in `last_poi_mask`, which `rollout_view_policy` records.
+    """
+
+    def __init__(self, train_state, env, config, deterministic=True, seed=0):
+        self._rovers = RecurrentViewPolicy(
+            train_state, env, config, deterministic, seed
+        )
+        global_state = global_state_fn(env)
+        v_observe = jax.vmap(env.observe)
+
+        @jax.jit
+        def manage(obs, state, key):
+            key, manager_key = jax.random.split(key)
+            batched = jax.tree.map(lambda x: x[None], state)
+            obs, (poi_mask, _, _) = observe_with_manager(
+                train_state.manager,
+                v_observe,
+                global_state(obs[None], batched),
+                jnp.ones((1,)),
+                batched,
+                manager_key,
+                deterministic=deterministic,
+            )
+            return obs[0], poi_mask[0], key
+
+        self._manage = manage
+        self._key = jax.random.fold_in(jax.random.PRNGKey(seed), 1)
+        self.reset()
+
+    def reset(self):
+        self._rovers.reset()
+        self.last_poi_mask = None
+
+    def __call__(self, obs, mask=None, state=None):
+        if state is None:
+            raise ValueError("the POI manager's view policy needs the env state")
+        obs, self.last_poi_mask, self._key = self._manage(obs, state, self._key)
+        return self._rovers(obs, mask)
 
 
 class RMAPPO_JAX_Runner(MAPPO_JAX_Runner):
@@ -138,7 +193,13 @@ class RMAPPO_JAX_Runner(MAPPO_JAX_Runner):
         if config.use_poi_manager:
             print(
                 f"  poi_manager=on | {self.env.n_pois} Bernoulli show/hide outputs "
-                f"| init logit bias {config.manager_init_bias} per POI"
+                f"| init logit bias {config.manager_init_bias} per POI "
+                f"| masks reward: "
+                + (
+                    "on (training only; evaluation ungated)"
+                    if config.manager_masks_reward
+                    else "off"
+                )
             )
         self._print_base_env()
 
@@ -148,12 +209,24 @@ class RMAPPO_JAX_Runner(MAPPO_JAX_Runner):
     def _eval_every(self) -> int:
         return self.config.eval_interval
 
-    def _view_policy(self, train_state):
-        if self.config.use_poi_manager:
-            # rollout_view_policy hands the policy observations only, and the
-            # manager needs the state; rendering it is not implemented.
-            raise NotImplementedError("view=true is not implemented with use_poi_manager")
-        return RecurrentViewPolicy(train_state, self.env, self.config)
+    def _view_policy(self, train_state, deterministic=True, seed=0):
+        policy = (
+            ManagedViewPolicy if self.config.use_poi_manager else RecurrentViewPolicy
+        )
+        return policy(train_state, self.env, self.config, deterministic, seed)
+
+    def _critic_apply(self, train_state):
+        """The GRU (or feedforward) critic, ValueNorm undone
+        (`MAPPO_JAX_Runner._critic_apply` gives the interface). `h` is one
+        hidden state per env `(B, recurrent_N, H)`, as in training."""
+        config = self.config
+        critic_ts, value_norm = train_state.critic_ts, train_state.value_norm
+
+        def apply(global_state, h, mask):
+            values, h = critic_ts.apply_fn(critic_ts.params, global_state, h, mask)
+            return denormalize_values(value_norm, values, config), h
+
+        return apply, lambda batch: zero_hidden(config, (batch,))
 
     # ------------------------------------------------------------------ io
 

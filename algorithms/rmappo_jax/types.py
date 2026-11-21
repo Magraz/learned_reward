@@ -74,6 +74,12 @@ class Params:
     # POI starts shown with probability sigmoid(3) = 0.95, independently, so
     # every POI is shown with probability 0.95^P (0.86 at 3 POIs, 0.75 at 6).
     manager_init_bias: float = 3.0
+    # Not on-policy's: the manager's mask also gates the reward during
+    # training. A POI it hides pays nothing and keeps its budget, so both
+    # learners train on the gated team reward. Evaluation and view stay
+    # ungated (the mask hides only from the observation there). Needs
+    # use_poi_manager. Not in run.META_FIELDS, so a resume does not check it.
+    manager_masks_reward: bool = False
 
 
 @dataclass
@@ -134,6 +140,7 @@ class RMAPPOConfig:
     eval_interval: int = 25
     use_poi_manager: bool = False
     manager_init_bias: float = 3.0
+    manager_masks_reward: bool = False
     use_recurrent_policy: bool = True
     hidden_size: int = 64
     layer_N: int = 1
@@ -194,6 +201,7 @@ def make_config(params: Params, model_params: Model_Params, n_envs: int):
         eval_interval=params.eval_interval,
         use_poi_manager=params.use_poi_manager,
         manager_init_bias=params.manager_init_bias,
+        manager_masks_reward=params.manager_masks_reward,
         **dataclasses.asdict(model_params),
     )
 

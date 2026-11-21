@@ -24,7 +24,9 @@ Rollouts follow on-policy's shared runner (`runner/shared/*_runner.py`):
 - With `use_poi_manager` (not on-policy's, see `manager.py`), the manager
   picks every step which POIs the rovers sense, the rovers act on the masked
   observation, and the trajectory and bootstrap value become (rovers',
-  manager's) pairs, each trained by its own `ppo_update`.
+  manager's) pairs, each trained by its own `ppo_update`. Under
+  `manager_masks_reward` the mask also gates collection's reward (a hidden POI
+  pays nothing and keeps its budget); evaluation stays ungated.
 
 `make_train` returns the same `(init_fn, collect_fn, update_fn, eval_fn,
 num_updates)` contract as `mappo_jax`, so `MAPPO_JAX_Runner.train` drives it.
@@ -45,10 +47,10 @@ from algorithms.mappo_jax.trainer import (
     training_reward,
 )
 from algorithms.rmappo_jax import manager as manager_lib
-from algorithms.rmappo_jax import value_norm as vn_lib
 from algorithms.rmappo_jax.mappo import (
     RMAPPOTrainState,
     create_train_state,
+    denormalize_values,
     ppo_update,
     zero_hidden,
 )
@@ -87,6 +89,11 @@ def validate(config: RMAPPOConfig, env):
         raise ValueError(
             f"n_steps={config.n_steps} is not a multiple of "
             f"data_chunk_length={config.data_chunk_length}"
+        )
+    if config.manager_masks_reward and not config.use_poi_manager:
+        raise ValueError(
+            "manager_masks_reward gates the reward by the POI manager's mask: "
+            "it needs use_poi_manager: true"
         )
     if config.use_poi_manager:
         manager_lib.validate_manager(config, env)
@@ -154,24 +161,23 @@ def make_train(config: RMAPPOConfig, env):
     # mask. Its keys are folded from the rovers' (`fold_in(..., 1)`), so the
     # rovers' key chains match a run without it.
     use_manager = config.use_poi_manager
+    # Under `manager_masks_reward` the manager's mask also gates the reward
+    # of collection's steps (a hidden POI pays nothing and keeps its budget).
+    # Evaluation stays ungated.
+    mask_reward = use_manager and config.manager_masks_reward
     if use_manager:
         mconfig = manager_lib.manager_config(config)
         v_observe = jax.vmap(env.observe)
 
     def _managed_obs(train_state, global_state, mask, env_state, rng, deterministic):
         """The manager's decision and the rovers' observation under it."""
-        poi_mask, log_prob, value = manager_lib.manager_step(
-            train_state.manager, global_state, mask, rng, deterministic
+        return manager_lib.observe_with_manager(
+            train_state.manager, v_observe, global_state, mask, env_state, rng,
+            deterministic,
         )
-        return v_observe(env_state, poi_mask), (poi_mask, log_prob, value)
 
     def _avail(env_state):
         return _v_avail(env_state) if use_action_mask else None
-
-    def _denormalize(value_norm, values):
-        if config.use_valuenorm:
-            return vn_lib.denormalize(value_norm, values)
-        return values
 
     def _zero_done(h, done):
         """`insert`: the hidden states of an env whose episode ended are zeroed."""
@@ -243,8 +249,11 @@ def make_train(config: RMAPPOConfig, env):
             n_agents,
         )
 
+        # The manager's mask, when it gates the reward. Both learners' rewards
+        # come from this step's info, so both train on the gated reward.
+        step_args = (manager_out[0],) if mask_reward else ()
         next_obs, next_env_state, env_reward, terminated, truncated, info = v_step(
-            env_state, actions
+            env_state, actions, *step_args
         )
         team_reward = info["task_reward"]
         done = jnp.logical_or(terminated, truncated)
@@ -264,8 +273,8 @@ def make_train(config: RMAPPOConfig, env):
                 jnp.ones((config.n_envs,)),
                 n_agents,
             )
-            reward = reward + config.gamma * truncated[:, None] * _denormalize(
-                train_state.value_norm, next_value
+            reward = reward + config.gamma * truncated[:, None] * denormalize_values(
+                train_state.value_norm, next_value, config
             )
 
         next_obs, next_env_state = restart_done_envs(
@@ -395,7 +404,10 @@ def make_train(config: RMAPPOConfig, env):
     def _eval_act(train_state, hidden, obs, env_state):
         # One episode per env and no restarts, so the mask is always 1.
         if use_manager:
-            # The manager's most likely mask, then the rovers act on it.
+            # The manager's most likely mask, then the rovers act on it. The
+            # mask hides only from the observation here, even under
+            # `manager_masks_reward`: evaluation is ungated by design, so
+            # `reward` compares with runs without the gate.
             obs, _ = _managed_obs(
                 train_state,
                 _global_state(obs, env_state),

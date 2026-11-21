@@ -32,10 +32,7 @@ from algorithms.mappo_jax.mappo import (
 
 
 class RunnerState(NamedTuple):
-    """Carries all mutable state between update iterations.
-
-    No env state: like vanilla, every rollout starts from freshly reset envs.
-    """
+    """Carries all mutable state between update iterations."""
 
     train_state: ActorCriticTrainState
     rng: jax.Array
@@ -131,9 +128,7 @@ def restart_done_envs(v_reset, reset_rng, n_envs, done, obs, env_state):
             _select, reset_state, cur_state
         )
 
-    return jax.lax.cond(
-        done.any(), _restart, lambda operand: operand, (obs, env_state)
-    )
+    return jax.lax.cond(done.any(), _restart, lambda operand: operand, (obs, env_state))
 
 
 class EvalPolicy(NamedTuple):
@@ -284,7 +279,12 @@ def make_train(config: MAPPOConfig, env):
     def init_fn(rng: jax.Array) -> RunnerState:
         rng, init_rng = jax.random.split(rng)
         train_state = create_train_state(
-            init_rng, config, obs_dim, gs_dim, action_dim, discrete,
+            init_rng,
+            config,
+            obs_dim,
+            gs_dim,
+            action_dim,
+            discrete,
             n_critic_outputs=n_critic_outputs,
         )
         return RunnerState(train_state=train_state, rng=rng)
@@ -375,9 +375,7 @@ def make_train(config: MAPPOConfig, env):
         )
 
         # Bootstrap value for GAE (done masking happens inside compute_gae)
-        last_value = _values(
-            train_state, _global_state(last_obs, last_env_state)
-        )
+        last_value = _values(train_state, _global_state(last_obs, last_env_state))
 
         rollout_stats = {
             # Team reward, not the learner's signal — otherwise this would report

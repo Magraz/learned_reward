@@ -236,7 +236,9 @@ or `evaluate()`.
   - `conf/model/mlp.yaml` (`mappo_jax`), `conf/model/{rmappo,mappo_mlp}.yaml`
     and their `_diffrew` twins (`rmappo_jax`; the twins also set
     `env.reward.mode: difference_rewards`), and `conf/model/rmappo_manager.yaml`
-    (`rmappo` plus the POI manager, see the rmappo_jax section). Each stack rejects the other's groups with a `TypeError`
+    (`rmappo` plus the POI manager, see the rmappo_jax section), and
+    `conf/model/rmappo_manager_masks_reward.yaml` (`rmappo_manager` plus
+    `manager_masks_reward`, same section). Each stack rejects the other's groups with a `TypeError`
     before any results directory is created;
   - `conf/seeds/standard.yaml`;
   - `conf/hydra/launcher/joblib_auto.yaml`.
@@ -409,6 +411,13 @@ mean over trials at each exact `total_steps`. Both reward figures use them.
     gives every subplot the same y range, covering every batch's curves and
     `max_rew_possible` line. Only the first column then keeps y tick labels.
     `false` scales each subplot to its own data.
+  - `multi_batches_share_y_axis_by_row` (added 2026-11-18, default `false`,
+    currently `true`): `true` gives every subplot of a row the same y range,
+    covering every curve and `max_rew_possible` line in that row (matplotlib's
+    `sharey="row"`), so the subplot with the widest range sets it. Only the
+    first column keeps y tick labels. Ignored when
+    `multi_batches_share_y_axis` is `true`. Both grids get it through
+    `make_multi_batch_grid`.
   - `max_rew_possible` (optional mapping, added 2026-11-09): batch (env group)
     name → highest possible reward, drawn as a grey dashed horizontal line in
     that batch's subplot and listed in the legend as "Max possible reward".
@@ -593,6 +602,100 @@ is the rover domain.
   seeds `rng_seed + 1..3`. Episodes run through
   `rover.rollout.rollout_view_policy`, a host loop that resets the policy each
   episode and stops at termination or truncation. `README.md` has the command.
+  With the `rmappo_jax` POI manager it also writes
+  `manager_masks_seed<k>.png` per episode and prints
+  `<path> (shown: P0 94%, ...)` (see the manager section). That line
+  deliberately avoids `(return`, which `scripts/view_results.sh` parses.
+  Every run also gets the critic value maps (next bullet).
+- **Critic value maps (`environments/rover/value_map.py`, added 2026-11-20).**
+  `view=true` draws what the trained critic predicts over the arena.
+  - The critic's value is a function of the whole state, not of a position:
+    - every rover's position and heading (the default input is the
+      concatenated heading-relative sensor sectors; a `_gs` group's global
+      state holds positions and budgets but no heading);
+    - the POI budgets (seen directly only under `_gs`);
+    - a GRU critic's hidden state, its memory of the episode.
+
+    So a 2D map is a slice that holds the rest fixed.
+  - **`value_map_seed<k>.png`** (`plot_value_slices`), one per rendered
+    episode:
+    - The panels are the phases `value_map.phase_steps` picks: step 0, the
+      first step each POI reads used up, 3 to 6 panels.
+    - In each panel the whole team is translated as a block so its centre
+      sits on each cell of an 80-cell grid (positions clipped to the arena).
+      The formation, budgets and the critic's hidden state are those carried
+      into that step.
+    - A sector critic is averaged over 16 headings, the team turning as a
+      block. A `_gs` critic is evaluated once.
+    - One colour scale for the row. Each title gives V and G at the real
+      state and the map's own range.
+    - Below: V along the real path against G.
+  - **`value_visitation.png`** (`plot_value_visitation`), one per run, from 64
+    episodes with sampled actions (as in training; the visitation seeds are
+    `rng_seed + 1000 + i`). Every visited state is binned by the team centre
+    on a 40-cell grid. Four panels: the mean V, the mean G (same scale), the
+    error V − G (diverging), and the visits per cell (log scale). Cells under
+    3 states are blank.
+  - **Quantities.**
+    - V: the critic's prediction of the discounted team return, γ = 0.99, in
+      reward units. The hook undoes `rmappo_jax`'s ValueNorm; `mappo_jax` has
+      none. A per-rover head (difference rewards) is averaged over the rovers.
+    - G: the realized discounted return-to-go,
+      `value_map.discounted_return_to_go`. It does not bootstrap at the time
+      limit, so it is `rmappo_jax`'s target exactly. `mappo_jax` bootstraps
+      there, so near the end its V should exceed G.
+    - Only states the critic is queried at in training count: steps 0 .. T−1,
+      never the state after the last step.
+  - **Caveats, printed on the figures.**
+    - Away from the path a slice is extrapolation.
+    - A GRU slice keeps the real history, so a far cell is a teleported team.
+    - The critic never sees the step counter: time limits are terminal, so V
+      averages over how much time is left.
+  - **Code.**
+    - `CriticProbe(env, value_fn, initial_hidden)` jits `along(traj)` (the
+      critic over a trajectory's states, padded to `max_steps + 1`),
+      `values_at`, `team_slice` and `visited`.
+    - It takes `value_fn(states, h, mask)` from the runner hook `_view_critic`
+      (see Subclass hooks), so it imports nothing from `algorithms/`.
+  - **Measured.** 6.5 s wall for a whole `view=true` on the CPU
+    (`rover_1a_3poi_c1_implicit012_ord_hidden`, `rmappo`), every figure
+    included.
+  - **First reading (2026-11-20).**
+    - `rover_2a_3poi_c2_implicit_gs` `rmappo_manager` trial 3 has strong
+      spatial structure: the slice spans 1.87-3.91 at step 0, 1.56-2.31
+      after P1, and −0.12-0.24 after P2. V tracks G within ±0.02 over the
+      visited cells.
+    - `rover_1a_3poi_c1_implicit012_ord_hidden` trial 0, run with
+      `env.pois.hide_when_used_up=false`, the observation it trained on (see
+      Loose ends). Without it, `rmappo`'s episode returned 3.60 instead of
+      5.80, and the maps were wrong.
+      - At step 0 the slices are flat (range 0.006 `rmappo`, 0.19
+        `mappo_mlp`), because one POI is sensed (next bullet).
+      - After the first depletion two POIs are sensed and the slices gain
+        structure: range 0.26-0.38 (`rmappo`) and 1.04 (`mappo_mlp`), as
+        wedges radiating from the POIs.
+      - `rmappo`'s V tracks G along the path. `mappo_mlp`'s V − G reaches
+        ±1.5 over the visited cells.
+  - ⚠ **Input LayerNorm hides distance (found 2026-11-20).**
+    `use_feature_normalization: true` (on-policy's default) applies LayerNorm
+    to the input. A sector observation with one nonzero entry, (x, 0, …, 0),
+    normalizes to the same vector for every x, i.e. for every distance to
+    the POI.
+    - Measured on that run's trained critics, with one POI in sector 0 at
+      presence 0.05 and then 0.33 (about 18 units away, then next to the
+      rover): V moves by 0.06 (`mappo_mlp`) and 0.005 (`rmappo`).
+    - The same POI in sector 2 instead of sector 0 moves V by 0.44.
+    - Halving both presences of a two-POI observation moves V by 0.003.
+    - Only at presence ≤ 0.02 does LayerNorm's ε break the invariance.
+    - So with one rover and one sensed POI (e.g. the start of every
+      `_ord_hidden` group of the 1-rover families), the critic sees the
+      bearing, not the distance. That is why averaging over headings gives a
+      flat map: 16 offsets put the POI in each of the 8 sectors twice at
+      every position.
+    - With two or more nonzero entries, their ratios survive (the relative
+      distance), but their common scale does not.
+    - The actor has the same input layer. Untested whether it is equally
+      blind.
 - **`scripts/view_results.sh`** (added 2026-11-05) runs `view=true` on one
   trial (`TRIAL`, default 0) of every `experiments/results/<env>/<model>/`, or
   of the env groups named as arguments. Settings are environment variables:
@@ -613,9 +716,25 @@ is the rover domain.
   (measured 2026-11-05: 14 runs in 15 s).
 - **Subclass hooks** (used by `rmappo_jax`): `_init_trial` (directories and
   seeding), `_make_train` (default `make_train(self.config, self.env)`),
-  `_steps_per_update`, `_eval_every`, `_view_policy` (returns an object with
-  `reset()` and `__call__(obs, mask=None)`; `StatelessViewPolicy` by default),
-  and in `trainer.py` `restart_done_envs` and
+  `_steps_per_update`, `_eval_every`, and `_view_policy(train_state,
+  deterministic=True, seed=0)`.
+  - `_view_policy` returns an object with `reset()` and `__call__(obs,
+    mask=None, state=None)`, `state` being the env state of the decision,
+    read only by `rmappo_jax`'s `ManagedViewPolicy`. The default is
+    `StatelessViewPolicy`.
+  - `deterministic=False` samples, as training's collection does, from a key
+    chain started at `seed` that runs on across episodes (`reset` leaves it).
+    The manager then samples its mask too, from its own chain (`seed` folded
+    with 1). The value maps' visitation episodes use it.
+  - `_critic_apply(train_state) -> (apply, initial_hidden)`: `apply(gs, h,
+    mask) -> (values (B, n_outputs), h)` in reward units. `mappo_jax`'s is
+    feedforward without ValueNorm. `rmappo_jax`'s undoes ValueNorm through
+    `rmappo_jax.mappo.denormalize_values`, the function training's advantages
+    and time-limit bootstrap also use.
+  - `_view_critic(train_state)` composes it with the critic input built from
+    env states by `global_state_fn` (shared, in the base class).
+
+  Also in `trainer.py`: `restart_done_envs` and
   `make_eval_fn(env, n_episodes, EvalPolicy(init, act))`. `train()` treats the
   trajectory and bootstrap value opaquely.
 - `conf/algorithm/mappo_jax.yaml`: `n_epochs` 6, `n_minibatches` 8, `n_steps`
@@ -755,7 +874,40 @@ uv run python train.py algorithm=rmappo_jax env=rover_2a_3poi_c2_implicit_gs mod
   `n_pois` logits and no enumerated pattern table or eight-POI cap.
   The binary mask goes to every rover through
   `env.observe(state, poi_mask)`, on top of the POIs' own hiding flags. Hidden
-  POIs still pay; only the observation changes.
+  POIs still pay; only the observation changes, unless
+  `manager_masks_reward` (next bullet).
+- **Masking the reward (`params.manager_masks_reward`, added 2026-11-20; model
+  group `rmappo_manager_masks_reward`).** During training the mask also gates
+  the reward: collection steps the env as `env.step(state, actions,
+  poi_mask)`.
+  - A hidden POI is inactive, like a locked one: it pays nothing, and so no
+    `D_i` either, and keeps its budget. While it has budget, POIs ordered
+    after it stay locked.
+  - Both learners' rewards come from that step's `info`, so the rovers and
+    the manager both train on the gated team reward.
+  - **Evaluation and `view()` stay ungated** (the author's choice), so
+    `reward` and `reward_base` compare with the other arms. There the mask
+    hides POIs from the observation only, through the same
+    `observe_with_manager`. The gated training reward and the ungated
+    `reward` therefore score different dynamics, and a gap between them is
+    expected.
+  - It requires `use_poi_manager` (`trainer.validate` raises otherwise).
+    With the flag off, collection traces exactly the code it did before.
+  - Like the manager's other settings it is not in `run.META_FIELDS`, so a
+    resume does not check it. Adding it would change the record's shape, and
+    every existing `rmappo_jax` checkpoint would then refuse to resume.
+  - The launch prints `masks reward: on (training only; evaluation ungated)`
+    or `off` on the `poi_manager=on` line.
+  - Smoke-verified 2026-11-20 (CPU, `rover_2a_3poi_c2_implicit_gs`, 2 updates
+    plus 1 resumed): trains, resumes, evaluates and renders. No training
+    result.
+  - Tests: `test_poi_manager.py` puts every POI's disc over the whole arena
+    and gives the head biases (20, −20, 20), so the manager hides POI 1 on
+    every step. With the flag, collection pays 0.2 per step; without it,
+    0.3 (the negative control). Evaluation returns 1.5 either way.
+    `test_rover_env.py` covers a masked POI paying no one and keeping its
+    budget, the lock it keeps on later POIs, and an all-true mask equalling
+    no mask over a jitted episode.
 - **Order within a step** (`trainer._env_step`): global state from the true
   state → the manager samples a mask → the rovers' observation is rebuilt
   under it → the rovers act on that observation, which is what `Transition.obs`
@@ -787,14 +939,44 @@ uv run python train.py algorithm=rmappo_jax env=rover_2a_3poi_c2_implicit_gs mod
   `manager_explained_variance` and the other `ppo_update` metrics with a
   `manager_` prefix. `manager_pois_shown` is the mean number of POIs shown per
   step over the rollout, i.e. how much the manager hides.
-- `view=true` raises `NotImplementedError` with the manager on: the view
-  rollout passes the policy observations only.
+- **The step order has one definition**, `manager.observe_with_manager`: the
+  manager's mask from the global state, then the rovers' observation rebuilt
+  under it (`env.observe(state, poi_mask)`). Collection, evaluation and
+  `view()` all call it.
+- **`view=true` (added 2026-11-19)** renders the manager.
+  - `ManagedViewPolicy` (`run.py`) wraps `RecurrentViewPolicy` and acts in
+    evaluation's order. The manager takes its most likely mask (show when the
+    logit is ≥ 0), so each step's mask is binary.
+  - `rollout_view_policy` records each step's mask in
+    `Trajectory.poi_masks` `(T, P)`.
+  - Besides the usual figures, each episode gets
+    `logs/rover/manager_masks_seed<k>.png` (`visualize.plot_poi_masks`).
+    - Left: the arena without rovers, each POI's radius disc filled by its
+      **share of steps shown**: the steps on which the mask showed it divided
+      by the episode's steps. It is drawn on the reference palette's
+      sequential blue ramp, fixed 0-100%, with the share written inside.
+    - Right: one row per POI, the steps the manager showed it (a black tick
+      where it was used up), and below on the same step axis the steps it
+      paid.
+  - "Shown" is the manager's own mask (the author's choice). On a `_hidden_gs`
+    group the env may still hide a POI the manager shows; the figure's
+    footnote says so.
+  - Checked 2026-11-19 on `rover_2a_3poi_c2_implicit_gs` trial 3 (return
+    4.80 on all three seeds, as in the replays below):
+    - POI 1 is shown until it is used up at step 30, then hidden;
+    - POI 2 alone is shown on the way to it (steps 30-48);
+    - shares 34-35% (POI 0), 29-32% (POI 1), 72-73% (POI 2).
 - Original categorical version smoke-verified 2026-11-16 (CPU,
   `rover_2a_3poi_c2_implicit_gs`, 2 updates):
   trains, resumes one more update with `checkpoint=true`, evaluates;
   `manager_pois_shown` 2.86 at the first update. Bernoulli coverage is in
   `algorithms/tests/test_poi_manager.py`: joint probabilities, entropy,
-  gradients, sampling, and 16-POI collection/update/evaluation.
+  gradients, sampling, and 16-POI collection/update/evaluation. It also
+  checks the view policy against an independent host loop through the
+  networks' apply functions: with head biases (3, −3, 3), POI 1 is hidden on
+  every step, and the masks and actions match. A negative control checks that
+  hiding POI 1 changes the observation. It also checks that the mask figure
+  is written.
 - **First result (analysed 2026-11-17), `rover_2a_3poi_c2_implicit_gs`, 10
   trials, 10M steps.** Final return (mean evaluation over the last 10% of
   updates; maximum 6.0): `rmappo_manager` 3.60-4.80 (mean 4.28), every
@@ -854,10 +1036,31 @@ in the buffer (shared and per agent), and the critic's single read per env
 across agents, an update that moves it). Re-evaluation covers the critic's
 per-env chunks for a team head and a per-agent head, and the masks negative
 control breaks both the actor's log-probs and the critic's values.
-`algorithms/tests/test_rover_trained_view.py` (3 tests) checks that
+`algorithms/tests/test_rover_trained_view.py` (3 tests, all pass since their
+group was renamed to `rover_4a_2poi_c2` on 2026-11-19) checks that
 `rollout_view_policy` + `RecurrentViewPolicy` reproduce an independent
-functional rollout (both model types), reset the GRU between episodes, and stop
-at early termination.
+functional rollout (both model types), reset the GRU between episodes, stop
+at early termination, and record no POI masks.
+`algorithms/tests/test_value_map.py` (27 tests, CPU, untrained networks)
+covers the critic value maps:
+- `CriticProbe.along` equals an independent host loop through the critic's
+  apply function, with ValueNorm undone and a per-rover head averaged. It is
+  checked for sector and `_gs` input, both model types, and a per-rover head.
+  Negative control: zeroing the GRU memory changes the values.
+- One compilation serves episodes of every length.
+- A slice at the team centre with one heading equals the path's value.
+- Moving the team changes a `_gs` critic. A `_gs` critic gives the same slice
+  for 1 and 16 headings.
+- Stub critics show the team translated as a block, clipped to the arena, its
+  headings offset together.
+- `discounted_return_to_go` is checked by hand. `phase_steps` is checked with
+  shared, terminal and no depletions, and when subsampled. `visitation_maps`
+  is checked against a numpy reference.
+- Sampled view policies: the default is deterministic, a seed reproduces, and
+  the chain runs on across episodes.
+- `view()` end to end writes both figures: `rmappo_jax` on three groups ×
+  both model types, the POI manager (whose sampled masks differ from its most
+  likely ones), and `mappo_jax`.
 
 **Smoke-verified 2026-10-27** on `rover_2poi_c2` (`trial_id=smoke`): train,
 resume and evaluate; eval 2.00 of 2 by 128k steps; 0.02 s collection / 0.09 s
@@ -931,7 +1134,11 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   env = load_rover_env("rover_2poi_c2", overrides=["env.n_agents=6"])
   ```
 - **Contract** (the functional API above, serving evolutionary algorithms and
-  RL alike): `step` takes no PRNG key (dynamics are deterministic). Attributes
+  RL alike): `step` takes no PRNG key (dynamics are deterministic).
+  `step(state, actions, poi_mask=None)`: a `(P,)` bool mask, when given, gates
+  the reward. A POI where it is false pays nothing that step and keeps its
+  budget; the returned observation is never masked. It is passed to the
+  reward model only when given, as `observe(state, poi_mask)` does. Attributes
   `n_agents`, `n_pois`, `observation_dim`, `action_dim = 2`, `discrete = False`,
   `max_steps`, `world_size`, `world_diagonal`, `spawn_region`,
   `per_agent_rewards`, `reward_mode`. `step`'s reward has shape
@@ -982,7 +1189,11 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   - Binning goes through `environments/sectors.py:sector_onehot`.
 - **Default reward** (`CouplingDepletionReward`), on post-move positions:
   - a POI is active when ≥ `coupling` rovers are within its radius (inclusive),
-    its `remaining` budget is > 0, and it is unlocked (see Temporal coupling);
+    its `remaining` budget is > 0, and it is unlocked (see Temporal coupling).
+    Given `step`'s `poi_mask` (the POI manager under `manager_masks_reward`),
+    it must also be shown: the reward model's `payable = unlocked & poi_mask`
+    feeds both `G` and the difference-reward counterfactual, while
+    `info["poi_unlocked"]` still reports the lock alone;
   - an active POI pays `min(rate, remaining)` per step and its budget drops by
     that much; extra rovers add nothing;
   - budgets below 1e-6 snap to 0, so value 1.0 / rate 0.05 depletes in exactly
@@ -1284,7 +1495,19 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
   - `rollout_reset(env, key)` returns the initial state `rollout` starts from,
     so a planner can read it and pass its plan as `params`.
   - `rollout_view_policy(env, policy, key)`: a host loop (not jittable) for a
-    runner's stateful view policy; used by `view()`.
+    runner's stateful view policy; used by `view()`. It calls
+    `policy(obs, state=state)`. A policy whose `last_poi_mask` is set after
+    the call (the POI manager's) has its masks stacked into
+    `Trajectory.poi_masks` `(T, P)`. The field is `None` otherwise, and
+    always `None` from `rollout`.
+    - It records every env state in `Trajectory.states` (a `RoverEnvState`
+      with a leading `T+1` axis; `None` from `rollout`), and reads positions,
+      headings and budgets from them. The critic value maps rebuild the
+      critic's input from these states.
+    - Since 2026-11-20 it keeps one jitted `reset` / `step` per env (a weak
+      dictionary) and stacks on the host. A fresh `jax.jit(env.step)` per call
+      re-traced, and `jnp.stack` of a hundred device arrays dispatched each.
+      Together that was about 0.2 s per episode; now 0.01-0.02 s.
 - **Demonstration policies** (`policies.py`, the scripted ones read the
   privileged state):
   - `random_policy`;
@@ -1614,17 +1837,38 @@ A pure-JAX, physics-free 2D multi-rover world. Rovers steer; points of interest
 
   Rover colours follow the categorical order; above 8 rovers all paths share
   one neutral colour. POIs are neutral ink.
+  - `plot_poi_masks(env, traj)` (2026-11-19, not from the CLI): the POI
+    manager's figure, written only by `view()` (see the manager section).
+  - Its colours come from `SEQUENTIAL_BLUE`, the reference palette's
+    sequential blue ramp (steps 100-700).
+  - `plot_value_slices` and `plot_value_visitation` (2026-11-20, not from the
+    CLI): the critic value maps, written only by `view()` (see JAX MAPPO).
+    - Values and returns use `SEQUENTIAL_BLUE`.
+    - The error V − G uses `DIVERGING`: the palette's blue ↔ red pair around
+      its grey midpoint, symmetric about 0.
+    - Visits use `SEQUENTIAL_ORANGE`: a second sequential context takes the
+      next categorical hue.
+    - Heatmaps go under `draw_arena(..., compact=True)`: outlined discs, a
+      used-up one dashed, only `P<k>` labels.
+    - Figure heights follow the arena's aspect (`_panel_width`, `_aspect`), so
+      no band is left empty above the panels.
+  - `plot_trajectory`'s payout panel and its rows share `_poi_rows`,
+    `_mark_used`, `_depleted_at` and `_episode_length`. `plot_trajectory`
+    renders pixel for pixel as before the refactor (checked on three
+    layouts).
 - `environments/rover/mpe_jax/mpe_introduction.py` is a standalone JaxMARL MPE
   (multi-agent particle environment) demo with random actions; it is not part
   of the rover domain and nothing imports it. It is the only remaining user of
   the `jaxmarl` package.
-- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (209 tests
-  with the 56 `_gs` groups, CPU; on 2026-11-16, 22 fail on stale variant
-  names (19 `rover_2poi_c2`, 3 `rover_4poi_c1234`), see Loose ends; every
-  route-plan test passes, the 56 `_gs` ones included).
-  `algorithms/tests/test_rover_trained_view.py`'s 3 tests fail the same way
-  (`rover_2poi_c2`).
-  `algorithms/tests/test_reward_base.py` (12 tests, CPU, all pass): the base
+- **Checks:** `uv run pytest algorithms/tests/test_rover_env.py -q` (211 tests
+  with the 56 `_gs` groups and the 2 mask-figure tests, CPU; on 2026-11-16, 22
+  fail on stale variant names (19 `rover_2poi_c2`, 3 `rover_4poi_c1234`), see
+  Loose ends; every route-plan test passes, the 56 `_gs` ones included).
+  `algorithms/tests/test_reward_base.py` (12 tests, CPU; since commit
+  `c065da8` (2026-11-17) the two `_hidden` cases of
+  `test_the_base_config_builds_the_unordered_group` fail. The base env keeps
+  `hide_when_used_up: true`, as designed, and the unordered group it is
+  compared with has `false`. Found 2026-11-19, not fixed): the base
   config is `None` for one-order layouts; for `rover_4a_2poi_c2_ord`,
   `_ord_hidden` and `rover_4a_4poi_c1234_hidden` it builds, without warnings,
   an env whose reset equals the unordered group's; it keeps the run's own

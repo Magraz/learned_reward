@@ -5,7 +5,9 @@ Every step, before the rovers act, the manager reads the env's global state
 budgets) and picks which POIs every rover senses. Its action is a binary mask
 sampled from one independent Bernoulli per POI, applied to all rovers through
 `env.observe(state, poi_mask)`. A hidden POI still pays; only what the rovers
-sense changes.
+sense changes. Under `manager_masks_reward` the mask also gates the reward
+during training (`env.step(state, actions, poi_mask)`): a hidden POI pays
+nothing and keeps its budget. Evaluation and `view()` stay ungated.
 
 It is trained alongside the rovers, from the same rollouts, on the team reward,
 with this stack's own PPO update (`mappo.ppo_update`): the manager is one
@@ -97,6 +99,26 @@ def manager_step(
     poi_mask, log_prob = sample_bernoulli(rng, logits, deterministic)
     value = manager_value(manager, global_state, episode_mask)
     return poi_mask, log_prob, value
+
+
+def observe_with_manager(
+    manager: RMAPPOTrainState, v_observe, global_state, episode_mask, env_state,
+    rng, deterministic,
+):
+    """The manager's decision and the rovers' observation under it.
+
+    The one definition of the step order, shared by collection, evaluation and
+    `view()`: the manager reads each env's global state `(B, gs_dim)`, picks a
+    mask, and the rovers' observation is rebuilt under it by `v_observe`, the
+    env's `observe` vmapped over the `B` envs of `env_state`.
+
+    Returns `(obs (B, n_agents, obs_dim), (poi_mask (B, P), log_prob (B,),
+    value (B, 1)))`.
+    """
+    poi_mask, log_prob, value = manager_step(
+        manager, global_state, episode_mask, rng, deterministic
+    )
+    return v_observe(env_state, poi_mask), (poi_mask, log_prob, value)
 
 
 def manager_transition(

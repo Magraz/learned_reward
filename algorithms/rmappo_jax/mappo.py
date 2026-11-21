@@ -56,6 +56,15 @@ class RMAPPOTrainState(NamedTuple):
     manager: Optional["RMAPPOTrainState"] = None
 
 
+def denormalize_values(value_norm, values, config: RMAPPOConfig):
+    """Critic outputs in reward units: ValueNorm undone when the run uses it
+    (`use_valuenorm`), else unchanged. The one definition, shared by the
+    advantages, the time-limit bootstrap and `view()`'s critic value maps."""
+    if config.use_valuenorm:
+        return vn_lib.denormalize(value_norm, values)
+    return values
+
+
 def zero_hidden(config: RMAPPOConfig, batch_shape) -> jnp.ndarray:
     """Zero GRU hidden states `(*batch_shape, recurrent_N, hidden_size)`, or a
     scalar placeholder the feedforward networks pass through untouched."""
@@ -125,11 +134,8 @@ def prepare_advantages(trajectory: Transition, last_value, value_norm, config):
     two `(n_steps, n_envs, n_agents)`. `trajectory.value` and `last_value` are
     the critic's normalized outputs.
     """
-    if config.use_valuenorm:
-        values = vn_lib.denormalize(value_norm, trajectory.value)
-        last_value = vn_lib.denormalize(value_norm, last_value)
-    else:
-        values = trajectory.value
+    values = denormalize_values(value_norm, trajectory.value, config)
+    last_value = denormalize_values(value_norm, last_value, config)
     advantages, returns = compute_gae(
         trajectory.reward,
         values,

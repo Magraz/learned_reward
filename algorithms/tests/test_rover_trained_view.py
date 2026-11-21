@@ -16,7 +16,7 @@ from environments.rover.rollout import rollout_view_policy
 @pytest.mark.parametrize("recurrent", [False, True], ids=["mappo_mlp", "rmappo"])
 def test_view_matches_functional_policy_and_resets_between_episodes(recurrent):
     with jax.default_device(jax.devices("cpu")[0]):
-        env = load_rover_env("rover_2poi_c2", ["env.max_steps=6"])
+        env = load_rover_env("rover_4a_2poi_c2", ["env.max_steps=6"])
         config = RMAPPOConfig(
             n_envs=1, n_steps=10, n_total_steps=10, hidden_size=8,
             use_recurrent_policy=recurrent,
@@ -52,12 +52,14 @@ def test_view_matches_functional_policy_and_resets_between_episodes(recurrent):
         np.testing.assert_allclose(first.rewards, rewards, atol=1e-6)
         np.testing.assert_array_equal(first.positions[0], state.rovers.position)
         assert first.done.tolist() == [False] * 5 + [True]
+        # Only a POI manager's view policy records masks.
+        assert first.poi_masks is None
         for a, b in zip(jax.tree.leaves(first), jax.tree.leaves(second)):
             np.testing.assert_array_equal(a, b)
 
 
 def test_view_stops_on_early_termination():
-    env = load_rover_env("rover_2poi_c2", [
+    env = load_rover_env("rover_4a_2poi_c2", [
         "env.pois.radius=100", "env.pois.rate=1", "env.max_steps=10",
     ])
 
@@ -65,7 +67,7 @@ def test_view_stops_on_early_termination():
         def reset(self):
             self.calls = 0
 
-        def __call__(self, obs):
+        def __call__(self, obs, state=None):
             self.calls += 1
             return jnp.tile(jnp.array([0.0, -1.0]), (env.n_agents, 1))
 

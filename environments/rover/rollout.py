@@ -18,9 +18,11 @@ a learned policy should read only ``obs``.
 """
 
 import dataclasses
+import weakref
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 @jax.tree_util.register_dataclass
@@ -33,43 +35,78 @@ class Trajectory:
     rewards: jax.Array  # (T,) team reward (info["task_reward"], not step's per-rover reward)
     done: jax.Array  # (T,) bool, episode over after step t (stays True)
     episode_return: jax.Array  # () sum of the team rewards
+    # (T, P) bool: the POI mask the policy's observation was built under at
+    # each step (the rmappo_jax POI manager's), or None for a policy without
+    # one. Only `rollout_view_policy` records it.
+    poi_masks: jax.Array | None = None
+    # The env state of every step: a `RoverEnvState` whose leaves have a
+    # leading T+1 axis (index 0 = reset), from which any learner's input can be
+    # rebuilt exactly (the critic value maps, `value_map.py`). Only
+    # `rollout_view_policy` records it; None from `rollout`.
+    states: object | None = None
+
+
+# The jitted `reset` and `step` of each env `rollout_view_policy` has run, so
+# repeated episodes reuse one trace (a fresh `jax.jit(env.step)` re-traces).
+_JITTED = weakref.WeakKeyDictionary()
+
+
+def _jitted(env):
+    if env not in _JITTED:
+        _JITTED[env] = (jax.jit(env.reset), jax.jit(env.step))
+    return _JITTED[env]
+
+
+def _stack(arrays):
+    """Stack per-step arrays on the host, then move them in one transfer
+    (``jnp.stack`` of a hundred small device arrays costs a dispatch each)."""
+    return jnp.asarray(np.stack([np.asarray(a) for a in arrays]))
 
 
 def rollout_view_policy(env, policy, key):
-    """Record one episode using a runner's stateful deterministic view policy.
+    """Record one episode using a runner's stateful view policy.
 
     The host loop lets recurrent policies carry hidden state between decisions.
     Reset that state for every episode and stop at termination or truncation.
     Unlike ``rollout``, this helper must not be wrapped in ``jax.jit``.
+
+    The policy is called as ``policy(obs, state=state)``; a policy that ignores
+    ``obs`` and rebuilds it from the state (the POI manager's) needs the state.
+    A policy with a ``last_poi_mask`` attribute that is not None after the call
+    has its masks recorded in ``Trajectory.poi_masks``. Every env state is
+    recorded in ``Trajectory.states``; positions, headings and budgets are
+    read from them.
     """
     policy.reset()
-    obs, state = jax.jit(env.reset)(key)
-    step = jax.jit(env.step)
-    positions = [state.rovers.position]
-    headings = [state.rovers.heading]
-    remaining = [state.pois.remaining]
-    actions, rewards, dones = [], [], []
+    reset, step = _jitted(env)
+    obs, state = reset(key)
+    states = [state]
+    actions, rewards, dones, poi_masks = [], [], [], []
     for _ in range(env.max_steps):
-        action = policy(obs)
+        action = policy(obs, state=state)
+        poi_mask = getattr(policy, "last_poi_mask", None)
+        if poi_mask is not None:
+            poi_masks.append(poi_mask)
         obs, state, _, terminated, truncated, info = step(state, action)
         done = terminated | truncated
-        positions.append(state.rovers.position)
-        headings.append(state.rovers.heading)
-        remaining.append(state.pois.remaining)
+        states.append(state)
         actions.append(action)
         rewards.append(info["task_reward"])
         dones.append(done)
         if bool(done):
             break
-    rewards = jnp.stack(rewards)
+    states = jax.tree.map(lambda *leaves: _stack(leaves), *states)
+    rewards = _stack(rewards)
     return Trajectory(
-        positions=jnp.stack(positions),
-        headings=jnp.stack(headings),
-        poi_remaining=jnp.stack(remaining),
-        actions=jnp.stack(actions),
+        positions=states.rovers.position,
+        headings=states.rovers.heading,
+        poi_remaining=states.pois.remaining,
+        actions=_stack(actions),
         rewards=rewards,
-        done=jnp.stack(dones),
+        done=_stack(dones),
         episode_return=rewards.sum(),
+        poi_masks=_stack(poi_masks) if poi_masks else None,
+        states=states,
     )
 
 

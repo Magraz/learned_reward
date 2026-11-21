@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 from flax.serialization import from_bytes, to_bytes
 
@@ -25,6 +26,7 @@ from algorithms.mappo_jax.mappo import create_train_state
 from algorithms.mappo_jax.trainer import (
     RunnerState,
     global_state_dim,
+    global_state_fn,
     make_train,
     per_agent_rewards,
 )
@@ -39,40 +41,51 @@ def set_seeds(seed: int):
 
 
 class StatelessViewPolicy:
-    """`view()`'s deterministic policy for a feedforward actor.
+    """`view()`'s policy for a feedforward actor.
 
     The interface every runner's `_view_policy` returns: `reset()` at the start
-    of each rendered episode, then `policy(obs, mask=None) -> actions` once per
-    decision. A feedforward actor has no state, so `reset` does nothing; a
-    recurrent runner returns an object that carries its hidden state instead.
+    of each rendered episode, then `policy(obs, mask=None, state=None) ->
+    actions` once per decision. A feedforward actor has no state, so `reset`
+    does nothing; a recurrent runner returns an object that carries its hidden
+    state instead. `state` is the env state the decision is taken in, read only
+    by a policy that rebuilds the observation itself (`rmappo_jax`'s
+    `ManagedViewPolicy`, which also exposes `last_poi_mask`).
+
+    `deterministic=True` (default) takes the distribution's mean, as
+    evaluation does. `False` samples, as training's collection does, from a
+    key chain started at `seed` that runs on across episodes (`reset` leaves
+    it), so successive episodes draw fresh noise.
     """
 
-    def __init__(self, train_state, env):
+    def __init__(self, train_state, env, deterministic: bool = True, seed: int = 0):
         from algorithms.mappo_jax.network import sample_action
 
         discrete = getattr(env, "discrete", False)
         n_agents, obs_dim = env.n_agents, env.observation_dim
 
         @jax.jit
-        def act(obs, mask):
+        def act(obs, mask, key):
+            key, action_key = jax.random.split(key)
             actions, _ = sample_action(
-                jax.random.PRNGKey(0),
+                action_key,
                 train_state.actor_ts.apply_fn,
                 train_state.actor_ts.params,
                 obs.reshape(n_agents, obs_dim),
                 discrete=discrete,
-                deterministic=True,
+                deterministic=deterministic,
                 action_mask=None if mask is None else mask.reshape(n_agents, -1),
             )
-            return actions
+            return actions, key
 
         self._act = act
+        self._key = jax.random.PRNGKey(seed)
 
     def reset(self):
         pass
 
-    def __call__(self, obs, mask=None):
-        return self._act(obs, mask)
+    def __call__(self, obs, mask=None, state=None):
+        actions, self._key = self._act(obs, mask, self._key)
+        return actions
 
 
 def make_env(env_config: dict):
@@ -265,10 +278,44 @@ class MAPPO_JAX_Runner:
         A subclass with a different update size overrides it."""
         return 10
 
-    def _view_policy(self, train_state):
-        """The deterministic policy `view()` renders (see `StatelessViewPolicy`
-        for the interface). A recurrent subclass overrides it."""
-        return StatelessViewPolicy(train_state, self.env)
+    def _view_policy(self, train_state, deterministic: bool = True, seed: int = 0):
+        """The policy `view()` renders (see `StatelessViewPolicy` for the
+        interface): deterministic by default, sampled for the value map's
+        visitation episodes. A recurrent subclass overrides it."""
+        return StatelessViewPolicy(train_state, self.env, deterministic, seed)
+
+    def _critic_apply(self, train_state):
+        """`(apply, initial_hidden)`: `apply(global_state (B, gs_dim), h, mask
+        (B,)) -> (values (B, n_outputs), h)` in reward units, and
+        `initial_hidden(B)` the hidden state an episode starts from. This
+        stack's critic is feedforward without value normalization, so the
+        hidden state is a scalar placeholder passed through. A subclass with
+        another critic overrides it."""
+        apply_fn, params = train_state.critic_ts.apply_fn, train_state.critic_ts.params
+
+        def apply(global_state, h, mask):
+            values = apply_fn(params, global_state)
+            return values.reshape(global_state.shape[0], -1), h
+
+        return apply, lambda batch: jnp.zeros(())
+
+    def _view_critic(self, train_state):
+        """`(value_fn, initial_hidden)` for the critic value maps
+        (`environments.rover.value_map.CriticProbe`).
+
+        `value_fn(states, h, mask (B,)) -> (values (B, n_outputs), h)` reads a
+        batch of `B` env states: their critic input is rebuilt through
+        `global_state_fn`, the definition training uses (the concatenated
+        observations of `env.observe`, or the env's global state), then
+        evaluated by `_critic_apply`."""
+        apply, initial_hidden = self._critic_apply(train_state)
+        global_state = global_state_fn(self.env)
+        v_observe = jax.vmap(self.env.observe)
+
+        def value_fn(states, h, mask):
+            return apply(global_state(v_observe(states), states), h, mask)
+
+        return value_fn, initial_hidden
 
     def train(self):
         from algorithms.mappo_jax.stats_tracker import TrainingStatsTracker
@@ -517,16 +564,45 @@ class MAPPO_JAX_Runner:
             f"view() has no renderer for {type(self.env).__name__}"
         )
 
-    def _view_rover(self, n_episodes: int = 3):
-        """Save arena and trained-policy trajectory PNGs in this trial's logs."""
+    def _view_rover(self, n_episodes: int = 3, n_visitation_episodes: int = 64):
+        """Save arena, trained-policy trajectory and critic value PNGs in this
+        trial's logs.
+
+        When the policy records POI masks (the `rmappo_jax` POI manager), each
+        episode also gets `manager_masks_seed<k>.png` (`plot_poi_masks`). Each
+        episode gets `value_map_seed<k>.png` (`plot_value_slices`), and the run
+        `value_visitation.png` (`plot_value_visitation`) from
+        `n_visitation_episodes` episodes with sampled actions (see
+        `environments/rover/value_map.py`).
+        """
         import matplotlib
 
         matplotlib.use("Agg")
         from environments.rover.rollout import rollout_view_policy
-        from environments.rover.visualize import plot_arena, plot_trajectory, save_figure
+        from environments.rover.value_map import (
+            SLICE_CELLS,
+            CriticProbe,
+            discounted_return_to_go,
+            grid_axes,
+            phase_steps,
+            state_at,
+            visitation_maps,
+        )
+        from environments.rover.visualize import (
+            plot_arena,
+            plot_poi_masks,
+            plot_trajectory,
+            plot_value_slices,
+            plot_value_visitation,
+            poi_shown_share,
+            save_figure,
+        )
 
         train_state = self._load_train_state()
         policy = self._view_policy(train_state)
+        probe = CriticProbe(self.env, *self._view_critic(train_state))
+        gamma = float(self.config.gamma)
+        xs, ys = grid_axes(self.env, SLICE_CELLS)
         out = self.dirs["logs"] / "rover"
         label = f"{self.trial_dir.parent.name} · trial {self.trial_id}"
         paths = [save_figure(plot_arena(self.env, label), out / "arena.png")]
@@ -540,6 +616,65 @@ class MAPPO_JAX_Runner:
             path = save_figure(fig, out / f"trajectory_seed{seed}.png")
             paths.append(path)
             print(f"{path} (return {float(traj.episode_return):.2f})")
+            if traj.poi_masks is not None:
+                fig = plot_poi_masks(
+                    self.env, traj, f"{label} · POI manager · deterministic · seed {seed}"
+                )
+                path = save_figure(fig, out / f"manager_masks_seed{seed}.png")
+                paths.append(path)
+                # Not "(return ...)": scripts/view_results.sh reads the episode
+                # returns from the lines that contain it.
+                shown = ", ".join(
+                    f"P{k} {s:.0%}" for k, s in enumerate(poi_shown_share(traj))
+                )
+                print(f"{path} (shown: {shown})")
+
+            # The critic's value over the arena at a few steps of this episode.
+            values, hidden = probe.along(traj)
+            returns = discounted_return_to_go(traj.rewards, gamma)
+            phases = phase_steps(traj)
+            slices = [
+                probe.team_slice(
+                    state_at(traj, t), jax.tree.map(lambda x: x[t], hidden), xs, ys
+                )
+                for t, _ in phases
+            ]
+            fig = plot_value_slices(
+                self.env, traj, phases, slices, xs, ys, values, returns,
+                gamma=gamma, n_headings=probe.n_headings, recurrent=probe.recurrent,
+                title=f"{label} · deterministic · seed {seed}",
+            )
+            path = save_figure(fig, out / f"value_map_seed{seed}.png")
+            paths.append(path)
+            # Not "(return ...)", as above.
+            print(f"{path} (critic V at step 0: {values[0]:.2f}, realized G "
+                  f"{returns[0]:.2f})")
+
+        # The critic's value where sampled episodes, as in training, go.
+        if n_visitation_episodes > 0:
+            seed = self.rng_seed + 1000
+            sampler = self._view_policy(train_state, deterministic=False, seed=seed)
+            visited = [
+                probe.visited(
+                    rollout_view_policy(
+                        self.env, sampler, jax.random.PRNGKey(seed + episode)
+                    ),
+                    gamma,
+                )
+                for episode in range(n_visitation_episodes)
+            ]
+            centroids, values, returns = (
+                np.concatenate(parts) for parts in zip(*visited)
+            )
+            maps = visitation_maps(self.env, centroids, values, returns)
+            fig = plot_value_visitation(
+                self.env, maps, n_visitation_episodes, len(values), gamma=gamma,
+                title=f"{label} · sampled actions",
+            )
+            path = save_figure(fig, out / "value_visitation.png")
+            paths.append(path)
+            print(f"{path} (mean critic V {values.mean():.2f}, mean realized G "
+                  f"{returns.mean():.2f}, over {len(values)} visited states)")
         return paths
 
     def evaluate(self):

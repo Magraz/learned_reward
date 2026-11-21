@@ -26,6 +26,18 @@ deterministic; the recurrent policy keeps its GRU state across steps and resets
 it between episodes. Reset seeds are the trial's training seed + 1, + 2 and + 3,
 so the two models use the same starts when comparing the same trial.
 
+Each trial also gets the critic's value maps:
+
+- `value_map_seed<seed>.png`, one per rendered episode: the critic's value V
+  over the arena at a few steps of the episode, with the team moved to each
+  cell. Below them, V along the real path against the discounted return that
+  followed.
+- `value_visitation.png`: V, the realized return, their difference and the
+  visit counts, averaged over 64 sampled-action episodes by where the team
+  went.
+
+`environments/rover/value_map.py` explains what each map holds fixed.
+
 Change `env` and `trial_id` to select another trained run. The loader uses
 `models_finished.msgpack` if present, otherwise `models_checkpoint.msgpack`.
 Use the same environment and model overrides as training. For CPU rendering,

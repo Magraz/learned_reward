@@ -14,15 +14,16 @@ from environments.rover.pois import unlocked
 DEPLETION_TOL = 1e-6
 
 
-def _payout(observed, pois, poi_unlocked):
+def _payout(observed, pois, payable):
     """Which POIs pay, and how much, when ``observed`` rovers are in each radius.
 
     ``observed`` is ``(..., P)``; leading axes broadcast, so one call also
-    scores a batch of counterfactual counts. ``poi_unlocked`` (P,) is
-    ``unlocked(pois)``; it depends only on the budgets, so a counterfactual
-    count shares it.
+    scores a batch of counterfactual counts. ``payable`` (P,) is
+    ``unlocked(pois)``, and-ed with the POI manager's mask when it gates the
+    reward; it does not depend on the rovers, so a counterfactual count
+    shares it.
     """
-    active = (observed >= pois.coupling) & (pois.remaining > 0) & poi_unlocked
+    active = (observed >= pois.coupling) & (pois.remaining > 0) & payable
     return active, jnp.where(active, jnp.minimum(pois.rate, pois.remaining), 0.0)
 
 
@@ -72,14 +73,20 @@ class CouplingDepletionReward(RewardModel):
         self.mode = mode
         self.per_agent_rewards = mode != "shared_reward"
 
-    def __call__(self, env, rovers, pois):
+    def __call__(self, env, rovers, pois, poi_mask=None):
+        """``poi_mask`` (P,) bool, when given, gates the reward: a POI where it
+        is false is inactive this step, like a locked one. It pays nothing
+        (no ``D_i`` either) and keeps its budget, so POIs ordered after it
+        stay locked. It is the ``rmappo_jax`` POI manager's mask under
+        ``manager_masks_reward`` (see ``BaseRoverEnv.step``)."""
         dist = jnp.linalg.norm(
             rovers.position[:, None, :] - pois.position[None, :, :], axis=-1
         )  # (A, P)
         in_radius = dist <= pois.radius[None, :]
         observed = in_radius.sum(axis=0)  # (P,)
         poi_unlocked = unlocked(pois)
-        active, payout = _payout(observed, pois, poi_unlocked)
+        payable = poi_unlocked if poi_mask is None else poi_unlocked & poi_mask
+        active, payout = _payout(observed, pois, payable)
         remaining = pois.remaining - payout
         remaining = jnp.where(remaining < DEPLETION_TOL, 0.0, remaining)
 
@@ -89,7 +96,7 @@ class CouplingDepletionReward(RewardModel):
         # difference is taken per POI before summing, so a POI rover i does not
         # complete contributes exactly 0 (no float residue from G - G_{-i}).
         _, payout_without = _payout(
-            observed - in_radius.astype(observed.dtype), pois, poi_unlocked
+            observed - in_radius.astype(observed.dtype), pois, payable
         )  # (A, P)
         difference_rewards = (payout - payout_without).sum(axis=-1)  # (A,)
         per_rover = {

@@ -446,6 +446,79 @@ def test_a_locked_poi_pays_no_one_even_with_its_coupling_met():
     np.testing.assert_allclose(info["difference_rewards"], [0.05, 0.05, 0.0])
 
 
+def test_a_masked_poi_pays_no_one_and_keeps_its_budget():
+    """`step`'s `poi_mask` (the rmappo_jax POI manager's, under
+    `manager_masks_reward`): a POI where it is false is inactive, like a
+    locked one, though its coupling is met. The other POIs pay as without a
+    mask, and the returned observation is not masked."""
+    env = make_env(n_agents=3, entries=[{"position": [2.0, 5.0], "coupling": 1},
+                                        {"position": [8.0, 5.0], "coupling": 2}])
+    state = state_at(env, [[2, 5], [8, 5], [8.5, 5]])
+    plain_obs, plain_state, _, _, _, plain = env.step(state, stay(3))
+    obs, masked_state, r, _, _, info = env.step(state, stay(3), jnp.array([True, False]))
+    np.testing.assert_array_equal(np.asarray(plain["poi_active"]), [True, True])
+    np.testing.assert_allclose(float(plain["task_reward"]), 0.1, rtol=1e-6)
+    np.testing.assert_array_equal(np.asarray(info["poi_active"]), [True, False])
+    # `poi_unlocked` still reports the order lock alone
+    np.testing.assert_array_equal(np.asarray(info["poi_unlocked"]), [True, True])
+    np.testing.assert_allclose(float(info["task_reward"]), 0.05, rtol=1e-6)
+    np.testing.assert_allclose(r, [0.05, 0.05, 0.05], rtol=1e-6)
+    np.testing.assert_allclose(info["difference_rewards"], [0.05, 0.0, 0.0], rtol=1e-6)
+    np.testing.assert_allclose(masked_state.pois.remaining, [0.95, 1.0], rtol=1e-6)
+    np.testing.assert_allclose(plain_state.pois.remaining, [0.95, 0.95], rtol=1e-6)
+    np.testing.assert_array_equal(obs, plain_obs)
+
+
+def test_a_masked_poi_keeps_the_pois_ordered_after_it_locked():
+    """A masked POI keeps its budget, so a POI of a higher order stays locked:
+    P0 would be used up on this step, and masked it is not."""
+    env = make_env(n_agents=3, entries=[{"position": [2.0, 5.0], "coupling": 1, "order": 0},
+                                        {"position": [8.0, 5.0], "coupling": 2, "order": 1}])
+    state = state_at(env, [[2, 5], [8, 5], [8.5, 5]], remaining=[0.05, 1.0])
+    hide_p0 = jnp.array([False, True])
+    _, unmasked, _, _, _, _ = env.step(state, stay(3))
+    _, masked, _, terminated, _, _ = env.step(state, stay(3), hide_p0)
+    assert not bool(terminated)
+    np.testing.assert_array_equal(np.asarray(unlocked(unmasked.pois)), [True, True])
+    np.testing.assert_array_equal(np.asarray(unlocked(masked.pois)), [True, False])
+    # On the next step P1's coupling is met; it pays only once P0 is used up.
+    _, _, _, _, _, info = env.step(unmasked, stay(3))
+    np.testing.assert_allclose(float(info["task_reward"]), 0.05, rtol=1e-6)
+    _, _, _, _, _, info = env.step(masked, stay(3), hide_p0)
+    assert float(info["task_reward"]) == 0.0
+
+
+def test_an_all_true_poi_mask_is_no_mask():
+    """Over a jitted scripted episode, stepping with every POI shown gives
+    exactly the states, rewards and info of stepping without a mask."""
+    env = load_rover_env("rover_4a_2poi_c2_ord")
+    policy = make_scripted_coalition_policy(env)
+    shown = jnp.ones((env.n_pois,), dtype=bool)
+
+    def episode(key, masked):
+        obs, state = env.reset(key)
+
+        def body(carry, k):
+            obs, state = carry
+            actions = policy(None, k, obs, state)
+            args = (shown,) if masked else ()
+            obs, state, reward, terminated, truncated, info = env.step(
+                state, actions, *args
+            )
+            return (obs, state), (obs, state, reward, terminated, truncated, info)
+
+        keys = jax.random.split(key, env.max_steps)
+        return jax.lax.scan(body, (obs, state), keys)[1]
+
+    key = jax.random.PRNGKey(5)
+    with_mask = jax.jit(lambda k: episode(k, True))(key)
+    without = jax.jit(lambda k: episode(k, False))(key)
+    assert float(without[5]["task_reward"].sum()) > 0.0
+    assert jax.tree.structure(with_mask) == jax.tree.structure(without)
+    for a, b in zip(jax.tree.leaves(with_mask), jax.tree.leaves(without)):
+        np.testing.assert_array_equal(a, b)
+
+
 def test_the_scripted_team_works_ordered_pois_in_their_order():
     """Two rovers, P1 ordered before P0: index order alone would park both at
     the locked P0 forever."""
@@ -991,6 +1064,33 @@ def test_every_variant_writes_arena_and_trajectory_images(tmp_path):
         trajectory = save_figure(plot_trajectory(env, traj, variant), tmp_path / f"{variant}_t.png")
         for path in (arena, trajectory):
             assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+@pytest.mark.parametrize(
+    "variant", ["rover_2a_3poi_c2_implicit_gs", "rover_2a_16poi_c2_grid_gs"]
+)
+def test_poi_mask_figure_from_recorded_masks(tmp_path, variant):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from environments.rover.visualize import plot_poi_masks, poi_shown_share, save_figure
+
+    env = load_rover_env(variant)
+    policy = make_scripted_coalition_policy(env)
+    traj = jax.jit(lambda k: rollout(env, policy, k))(jax.random.PRNGKey(0))
+    # The scanned rollout records no masks, so it has no share to plot.
+    assert traj.poi_masks is None
+    with pytest.raises(ValueError, match="no POI masks"):
+        poi_shown_share(traj)
+
+    # POI k shown on the steps t with t % (k + 2) == 0.
+    steps = np.arange(traj.actions.shape[0])[:, None]
+    masks = steps % (np.arange(env.n_pois)[None] + 2) == 0
+    traj = dataclasses.replace(traj, poi_masks=jnp.asarray(masks))
+    length = int(np.argmax(np.asarray(traj.done))) + 1 if traj.done.any() else len(steps)
+    np.testing.assert_allclose(poi_shown_share(traj), masks[:length].mean(axis=0))
+    path = save_figure(plot_poi_masks(env, traj, variant), tmp_path / "masks.png")
+    assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_figures_label_each_poi_order_only_in_an_ordered_layout():

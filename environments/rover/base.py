@@ -6,7 +6,8 @@ API in the style of the MJX envs::
     obs, state = env.reset(key)
     obs, state, reward, terminated, truncated, info = env.step(state, actions)
 
-There is no auto-reset (the caller's job) and no PRNG key in ``step``, so a
+``step`` also takes an optional ``poi_mask`` that gates the reward (see
+``step``). There is no auto-reset (the caller's job) and no PRNG key in ``step``, so a
 rollout is a pure function of the reset key and the actions. That serves
 evolutionary algorithms (vmap a rollout over a population) and RL alike.
 
@@ -162,10 +163,18 @@ class BaseRoverEnv:
         )
         return self.observe(state), state
 
-    def step(self, state, actions):
+    def step(self, state, actions, poi_mask=None):
+        """``poi_mask`` (P,) bool, when given, gates the reward: a POI where it
+        is false pays nothing this step and keeps its budget (the
+        ``rmappo_jax`` POI manager's mask under ``manager_masks_reward``). It
+        is passed to the reward model only when given, like ``observe``'s.
+        The returned observation is never masked."""
         rovers, speed = self.move(state.rovers, actions)
         pois = self.pois.step(state.pois, rovers, state.t)
-        out = self.reward(self, rovers, pois)
+        if poi_mask is None:
+            out = self.reward(self, rovers, pois)
+        else:
+            out = self.reward(self, rovers, pois, poi_mask=poi_mask)
         t = state.t + 1
         terminated = jnp.asarray(out.terminated, dtype=bool)
         truncated = (t >= self.max_steps) & ~terminated

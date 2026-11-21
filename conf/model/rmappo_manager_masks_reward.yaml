@@ -1,0 +1,13 @@
+# @package _global_
+# rmappo_manager plus the manager's mask gating the reward during training
+# (`params.manager_masks_reward`): a POI the manager hides pays nothing and
+# keeps its budget, so the rovers are paid only at POIs they can sense.
+# Evaluation (reward, reward_base) and view stay ungated (the manager hides
+# POIs only from the observation there), so they compare with the other arms.
+# Needs an env group with `env.global_state: true`, as rmappo_manager does.
+defaults:
+  - rmappo_manager
+  - _self_
+
+params:
+  manager_masks_reward: true

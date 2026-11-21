@@ -66,4 +66,8 @@ class RewardModel(abc.ABC):
 
     @abc.abstractmethod
     def __call__(self, env, rovers: RoverState, pois: POIState) -> RewardOutput:
-        """Reward for the rovers' post-move positions."""
+        """Reward for the rovers' post-move positions. A model that can gate
+        POIs also takes ``poi_mask`` ((P,) bool, false = the POI pays nothing
+        this step), which ``BaseRoverEnv.step`` passes only when one is given;
+        the ``rmappo_jax`` POI manager needs it under
+        ``manager_masks_reward``."""
